@@ -271,6 +271,9 @@ import sqlite3
 # 取得目前時間
 from datetime import datetime
 
+# 串接行事曆
+from calendar_service import get_today_events_text, create_calendar_event
+
 
 # 建立 FastAPI 應用
 app = FastAPI()
@@ -890,6 +893,37 @@ async def webhook(request: Request):
                 lines.append(f"- {item['type']}: {item['value']}")
 
             reply(reply_token, "\n".join(lines))
+            continue
+
+        # 查詢今天行程
+        if user_msg == "/calendar_today":
+            try:
+                result_text = get_today_events_text()
+            except Exception as e:
+                result_text = f"讀取 Google 行事曆失敗：{str(e)}"
+
+            reply(reply_token, result_text)
+            continue
+
+        # 新增行事曆事件
+        if user_msg.startswith("/add_event "):
+            try:
+                parts = user_msg.split(" ", 4)
+
+                if len(parts) < 5:
+                    reply(reply_token, "格式錯誤，請使用：/add_event 2026-03-31 14:00 15:00 事件名稱")
+                    continue
+
+                date_str = parts[1]
+                start_str = parts[2]
+                end_str = parts[3]
+                title = parts[4]
+
+                create_calendar_event(date_str, start_str, end_str, title)
+
+                reply(reply_token, f"已新增行程：{title}")
+            except Exception as e:
+                reply(reply_token, f"新增行事曆失敗：{str(e)}")
             continue
 
         try:
