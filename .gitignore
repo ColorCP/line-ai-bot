@@ -1,0 +1,6 @@
+credentials.json
+token.json
+chat_memory.db
+.env
+__pycache__/
+*.pyc
