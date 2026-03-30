@@ -53,7 +53,7 @@ def call_ai(user_msg):
     data = {
         "model": "gpt-4o-mini",
         "messages": [
-            {"role": "system", "content": "你是一個貼心的AI助理"},
+            {"role": "system", "content": "你是一個貼心的AI秘書"},
             {"role": "user", "content": user_msg}
         ]
     }
