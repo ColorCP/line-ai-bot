@@ -4,50 +4,70 @@ import os
 
 app = FastAPI()
 
-CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-
-@app.get("/")
-def root():
-    return {"status": "ok"}
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 @app.post("/webhook")
 async def webhook(request: Request):
     body = await request.json()
 
-    try:
-        events = body.get("events", [])
+    events = body.get("events", [])
 
-        for event in events:
-            if event.get("type") != "message":
-                continue
+    for event in events:
+        if event.get("type") != "message":
+            continue
 
-            message = event.get("message", {})
-            if message.get("type") != "text":
-                continue
+        message = event.get("message", {})
+        if message.get("type") != "text":
+            continue
 
-            user_msg = message.get("text", "")
-            reply_token = event.get("replyToken")
+        user_msg = message.get("text", "")
+        reply_token = event.get("replyToken")
 
-            if not reply_token:
-                continue
+        # 👉 呼叫 AI
+        ai_reply = call_ai(user_msg)
 
-            reply_msg = f"收到：{user_msg}"
-
-            requests.post(
-                "https://api.line.me/v2/bot/message/reply",
-                headers={
-                    "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "replyToken": reply_token,
-                    "messages": [
-                        {"type": "text", "text": reply_msg}
-                    ]
-                }
-            )
-
-    except Exception as e:
-        print("error:", str(e))
+        # 👉 回傳給 LINE
+        reply(reply_token, ai_reply)
 
     return {"status": "ok"}
+
+
+def call_ai(user_msg):
+    url = "https://api.openai.com/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": "你是一個貼心的AI助理"},
+            {"role": "user", "content": user_msg}
+        ]
+    }
+
+    res = requests.post(url, headers=headers, json=data)
+    result = res.json()
+
+    return result["choices"][0]["message"]["content"]
+
+
+def reply(reply_token, text):
+    url = "https://api.line.me/v2/bot/message/reply"
+
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "replyToken": reply_token,
+        "messages": [
+            {"type": "text", "text": text}
+        ]
+    }
+
+    requests.post(url, headers=headers, json=data)
