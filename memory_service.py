@@ -279,3 +279,77 @@ def clear_all_user_memory(user_id: str):
     clear_user_messages(user_id)
     clear_user_profiles(user_id)
     clear_user_summaries(user_id)
+
+from openai_service import extract_profile_memories_from_text, summarize_messages_for_memory
+
+
+def auto_extract_and_save_profile_memories(user_id: str, user_msg: str):
+    """
+    自動從使用者輸入中抽取長期記憶並寫入資料庫
+    """
+    memories = extract_profile_memories_from_text(user_msg)
+
+    for item in memories:
+        memory_type = item["type"]
+        memory_value = item["value"]
+        upsert_profile_memory(user_id, memory_type, memory_value)
+
+def summarize_if_needed(user_id: str, threshold: int = 20, chunk_size: int = 12):
+    """
+    如果某位使用者的短期對話累積太多，
+    就把較舊對話濃縮成摘要後存起來，並刪除舊訊息。
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM messages
+        WHERE user_id = ?
+    """, (user_id,))
+
+    total_count = cursor.fetchone()[0]
+
+    if total_count < threshold:
+        conn.close()
+        return
+
+    cursor.execute("""
+        SELECT id, role, content
+        FROM messages
+        WHERE user_id = ?
+        ORDER BY id ASC
+        LIMIT ?
+    """, (user_id, chunk_size))
+
+    rows = cursor.fetchall()
+
+    if not rows:
+        conn.close()
+        return
+
+    old_messages = []
+    message_ids = []
+
+    for row in rows:
+        message_id, role, content = row
+        message_ids.append(message_id)
+        old_messages.append({
+            "role": role,
+            "content": content
+        })
+
+    conn.close()
+
+    summary_text = summarize_messages_for_memory(old_messages)
+    save_summary(user_id, summary_text)
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    placeholders = ",".join(["?"] * len(message_ids))
+    sql = f"DELETE FROM messages WHERE id IN ({placeholders})"
+    cursor.execute(sql, message_ids)
+
+    conn.commit()
+    conn.close()
