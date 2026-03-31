@@ -6,13 +6,16 @@
 # 2. 提供一般聊天回覆
 # 3. 提供記憶抽取
 # 4. 提供意圖判斷
+# 5. 提供行事曆查詢 / 新增解析
 #
 # 後面如果你要換模型、改參數，
 # 集中改這裡就好，不用去 main.py 到處改。
 # ============================================================
 
 import os
+import json
 import requests
+from datetime import datetime, timedelta
 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -83,7 +86,6 @@ def extract_profile_memories_from_text(user_msg: str) -> list:
         return []
 
     try:
-        import json
         data = json.loads(result)
 
         if isinstance(data, list):
@@ -215,6 +217,7 @@ def classify_intent(user_msg: str) -> str:
 
     return "chat"
 
+
 def parse_calendar_query(user_msg: str) -> dict:
     """
     解析查詢行事曆需求
@@ -239,7 +242,6 @@ def parse_calendar_query(user_msg: str) -> dict:
     result = call_openai(messages, temperature=0.0).strip()
 
     try:
-        import json
         return json.loads(result)
     except Exception:
         return {"type": "unknown"}
@@ -248,19 +250,62 @@ def parse_calendar_query(user_msg: str) -> dict:
 def parse_calendar_create(user_msg: str) -> dict:
     """
     解析新增行事曆需求
-    第 1 版要求 AI 輸出固定 JSON
+
+    回傳格式：
+    {
+        "date": "YYYY-MM-DD",
+        "start": "HH:MM",
+        "end": "HH:MM",
+        "title": "事件名稱"
+    }
+
+    重點：
+    1. 以「現在時間」當基準，不要亂用固定年份
+    2. 預設時區為 Asia/Taipei
+    3. 如果使用者只說明天 / 後天，要根據今天推算正確日期
+    4. 如果沒有提供結束時間，預設加 1 小時
     """
+
+    now = datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
+    tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    day_after_tomorrow_str = (now + timedelta(days=2)).strftime("%Y-%m-%d")
+    current_year = now.strftime("%Y")
+    current_month = now.strftime("%m")
+    current_day = now.strftime("%d")
+
     messages = [
         {
             "role": "system",
             "content": (
-                "請從使用者輸入中解析行事曆建立需求。"
-                "請只輸出 JSON，不要輸出其他文字。"
-                "格式如下："
-                '{"date":"2026-03-31","start":"15:00","end":"16:00","title":"與客戶開會"}'
-                "如果無法解析，請輸出："
-                '{"date":"","start":"","end":"","title":""}'
-                "預設時區為 Asia/Taipei。"
+                "你是一個行事曆建立需求解析器。"
+                "請根據使用者輸入，解析出要建立的行程資料。"
+                "你只能輸出 JSON，不能輸出其他文字。\n\n"
+
+                "【目前基準時間】\n"
+                f"今天日期是：{today_str}\n"
+                f"明天日期是：{tomorrow_str}\n"
+                f"後天日期是：{day_after_tomorrow_str}\n"
+                f"今年是：{current_year} 年\n"
+                f"今天月日是：{current_month} 月 {current_day} 日\n\n"
+
+                "【輸出格式】\n"
+                '{"date":"YYYY-MM-DD","start":"HH:MM","end":"HH:MM","title":"事件名稱"}\n\n'
+
+                "【解析規則】\n"
+                "1. '今天' 就用今天日期。\n"
+                "2. '明天' 就用明天日期。\n"
+                "3. '後天' 就用後天日期。\n"
+                "4. 若使用者有講明確日期，例如 4月2日、2026/4/2，請轉成 YYYY-MM-DD。\n"
+                "5. 若只有開始時間、沒有結束時間，end 預設為 start 後 1 小時。\n"
+                "6. '下午三點' = 15:00，'上午十點' = 10:00。\n"
+                "7. 若無法解析，請輸出："
+                '{"date":"","start":"","end":"","title":""}\n'
+                "8. 預設時區為 Asia/Taipei。\n"
+                "9. 不可以自己亂用 2023、2024 等固定年份，若使用者沒特別說年份，就以目前基準時間推算。\n"
+                "10. title 要精簡，抓出真正事件名稱，例如："
+                "「幫我加上明天下午三點的會議，與微軟開會」"
+                "可輸出 title 為「與微軟開會」。\n"
             )
         },
         {
@@ -270,18 +315,23 @@ def parse_calendar_create(user_msg: str) -> dict:
     ]
 
     result = call_openai(messages, temperature=0.0).strip()
+    print("parse_calendar_create raw =", result)
 
     try:
-        import json
         data = json.loads(result)
 
-        return {
+        parsed = {
             "date": str(data.get("date", "")).strip(),
             "start": str(data.get("start", "")).strip(),
             "end": str(data.get("end", "")).strip(),
             "title": str(data.get("title", "")).strip()
         }
-    except Exception:
+
+        print("parse_calendar_create parsed =", parsed)
+        return parsed
+
+    except Exception as e:
+        print("parse_calendar_create json error =", str(e))
         return {
             "date": "",
             "start": "",
