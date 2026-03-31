@@ -116,7 +116,8 @@ def google_oauth_start(user_id: str):
             user_id=user_id,
             base_url=APP_BASE_URL
         )
-
+        print("APP_BASE_URL =", APP_BASE_URL)
+        print("GOOGLE AUTH URL =", auth_url)
         # 🔥 關鍵：直接跳轉（不是回 JSON）
         return RedirectResponse(auth_url)
 
