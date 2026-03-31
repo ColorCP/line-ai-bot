@@ -1,6 +1,12 @@
 # ============================================================
 # calendar_service.py
 # ============================================================
+# 功能：
+# 1. 從資料庫讀取 Google token
+# 2. 查詢 Google Calendar 行程
+# 3. 建立 Google Calendar 行程
+# 4. 回傳可直接給 LINE 使用的文字
+# ============================================================
 
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
@@ -10,15 +16,21 @@ from googleapiclient.discovery import build
 
 from db import get_google_token
 
-
 TZ = ZoneInfo("Asia/Taipei")
 
 
 def _get_google_creds(user_id: str) -> Credentials:
+    """
+    從 DB 取出指定使用者的 Google token，建立 Credentials
+    """
     token_data = get_google_token(user_id)
 
     if not token_data:
-        raise ValueError("你還沒有綁定 Google 行事曆，請先綁定。")
+        raise ValueError("你還沒有綁定 Google 行事曆，請先輸入：綁定行事曆")
+
+    scopes = []
+    if token_data.get("scopes"):
+        scopes = token_data["scopes"].split(",")
 
     return Credentials(
         token=token_data["access_token"],
@@ -26,21 +38,30 @@ def _get_google_creds(user_id: str) -> Credentials:
         token_uri=token_data["token_uri"],
         client_id=token_data["client_id"],
         client_secret=token_data["client_secret"],
-        scopes=token_data["scopes"].split(",") if token_data.get("scopes") else []
+        scopes=scopes
     )
 
 
 def _get_service(user_id: str):
+    """
+    建立 Google Calendar API service
+    """
     creds = _get_google_creds(user_id)
     return build("calendar", "v3", credentials=creds)
 
 
 def _format_event_time(dt_str: str) -> str:
+    """
+    把 Google 回傳的 ISO datetime 轉成台北時間字串
+    """
     dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00")).astimezone(TZ)
     return dt.strftime("%Y-%m-%d %H:%M")
 
 
 def _format_event_item(event: dict) -> str:
+    """
+    把單一 event 整理成可顯示的文字
+    """
     summary = event.get("summary", "(無標題)")
     start_raw = event["start"].get("dateTime") or event["start"].get("date")
     end_raw = event["end"].get("dateTime") or event["end"].get("date")
@@ -54,6 +75,9 @@ def _format_event_item(event: dict) -> str:
 
 
 def get_events_by_range(user_id: str, start_dt: datetime, end_dt: datetime) -> list:
+    """
+    查詢指定時間範圍內的 Google Calendar events
+    """
     service = _get_service(user_id)
 
     events_result = service.events().list(
@@ -68,6 +92,23 @@ def get_events_by_range(user_id: str, start_dt: datetime, end_dt: datetime) -> l
 
 
 def get_events_text_by_query(user_id: str, query_type: str) -> str:
+    """
+    依 query type 回傳純文字結果
+    """
+    payload = get_events_payload_by_query(user_id, query_type)
+    return payload["text"]
+
+
+def get_events_payload_by_query(user_id: str, query_type: str) -> dict:
+    """
+    根據 query_type 查詢行事曆
+    回傳：
+    {
+        "text": "...",
+        "events": [...],
+        "query_type": "this_week"
+    }
+    """
     now = datetime.now(TZ)
 
     if query_type == "today":
@@ -110,24 +151,43 @@ def get_events_text_by_query(user_id: str, query_type: str) -> str:
         start_dt = datetime.combine(now.date(), time.min, tzinfo=TZ)
         end_dt = datetime.combine(now.date(), time.max, tzinfo=TZ)
         title = "你今天的行程："
+        query_type = "today"
 
     events = get_events_by_range(user_id, start_dt, end_dt)
 
     if not events:
-        return f"{title}\n目前沒有行程。"
+        text = f"{title}\n目前沒有行程。"
+        return {
+            "text": text,
+            "events": [],
+            "query_type": query_type
+        }
 
     lines = [title]
     for event in events:
         lines.append(_format_event_item(event))
 
-    return "\n".join(lines)
+    text = "\n".join(lines)
+
+    return {
+        "text": text,
+        "events": events,
+        "query_type": query_type
+    }
 
 
 def get_today_events_text(user_id: str) -> str:
+    """
+    保留舊介面，方便相容
+    """
     return get_events_text_by_query(user_id, "today")
 
 
 def create_calendar_event(user_id: str, date_str: str, start_str: str, end_str: str, title: str) -> dict:
+    """
+    建立 Google Calendar 行程
+    並回傳完整結果，讓 LINE 可以顯示主題 / 開始 / 結束時間
+    """
     service = _get_service(user_id)
 
     start_dt = datetime.fromisoformat(f"{date_str}T{start_str}:00").replace(tzinfo=TZ)
@@ -142,6 +202,15 @@ def create_calendar_event(user_id: str, date_str: str, start_str: str, end_str: 
         "end": {
             "dateTime": end_dt.isoformat(),
             "timeZone": "Asia/Taipei"
+        },
+        "reminders": {
+            "useDefault": False,
+            "overrides": [
+                {
+                    "method": "popup",
+                    "minutes": 10
+                }
+            ]
         }
     }
 
