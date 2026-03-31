@@ -214,3 +214,77 @@ def classify_intent(user_msg: str) -> str:
         return result
 
     return "chat"
+
+def parse_calendar_query(user_msg: str) -> dict:
+    """
+    解析查詢行事曆需求
+    第 1 版先只支援今天
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "請解析使用者是否在查詢今天行程。"
+                "如果是，回覆 JSON：{\"type\":\"today\"}"
+                "如果不是，回覆 JSON：{\"type\":\"unknown\"}"
+                "不要輸出其他文字。"
+            )
+        },
+        {
+            "role": "user",
+            "content": user_msg
+        }
+    ]
+
+    result = call_openai(messages, temperature=0.0).strip()
+
+    try:
+        import json
+        return json.loads(result)
+    except Exception:
+        return {"type": "unknown"}
+
+
+def parse_calendar_create(user_msg: str) -> dict:
+    """
+    解析新增行事曆需求
+    第 1 版要求 AI 輸出固定 JSON
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "請從使用者輸入中解析行事曆建立需求。"
+                "請只輸出 JSON，不要輸出其他文字。"
+                "格式如下："
+                '{"date":"2026-03-31","start":"15:00","end":"16:00","title":"與客戶開會"}'
+                "如果無法解析，請輸出："
+                '{"date":"","start":"","end":"","title":""}'
+                "預設時區為 Asia/Taipei。"
+            )
+        },
+        {
+            "role": "user",
+            "content": user_msg
+        }
+    ]
+
+    result = call_openai(messages, temperature=0.0).strip()
+
+    try:
+        import json
+        data = json.loads(result)
+
+        return {
+            "date": str(data.get("date", "")).strip(),
+            "start": str(data.get("start", "")).strip(),
+            "end": str(data.get("end", "")).strip(),
+            "title": str(data.get("title", "")).strip()
+        }
+    except Exception:
+        return {
+            "date": "",
+            "start": "",
+            "end": "",
+            "title": ""
+        }
