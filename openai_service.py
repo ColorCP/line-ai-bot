@@ -11,22 +11,20 @@
 # 後面如果你要換模型、改參數，
 # 集中改這裡就好，不用去 main.py 到處改。
 # ============================================================
+# ============================================================
+# openai_service.py
+# ============================================================
 
 import os
 import json
 import requests
 from datetime import datetime, timedelta
 
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
 def call_openai(messages: list, temperature: float = 0.3) -> str:
-    """
-    通用 OpenAI 呼叫函式
-    messages 要符合 Chat Completions 格式
-    """
     if not OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY 尚未設定")
 
@@ -51,15 +49,6 @@ def call_openai(messages: list, temperature: float = 0.3) -> str:
 
 
 def extract_profile_memories_from_text(user_msg: str) -> list:
-    """
-    從使用者輸入中抽取可長期記憶的資訊
-    回傳格式：
-    [
-        {"type": "name", "value": "卡樂"},
-        {"type": "job", "value": "軟體工程師"}
-    ]
-    如果沒有可記憶內容，回傳空陣列
-    """
     messages = [
         {
             "role": "system",
@@ -113,11 +102,6 @@ def extract_profile_memories_from_text(user_msg: str) -> list:
 
 
 def summarize_messages_for_memory(old_messages: list) -> str:
-    """
-    將較舊對話整理成摘要
-    old_messages 格式：
-    [{"role":"user","content":"..."}, {"role":"assistant","content":"..."}]
-    """
     text_lines = []
 
     for item in old_messages:
@@ -146,9 +130,6 @@ def summarize_messages_for_memory(old_messages: list) -> str:
 
 
 def chat_with_memory(user_msg: str, profile_text: str, summary_text: str, recent_messages: list) -> str:
-    """
-    使用記憶上下文進行聊天回覆
-    """
     system_prompt = {
         "role": "system",
         "content": (
@@ -168,15 +149,6 @@ def chat_with_memory(user_msg: str, profile_text: str, summary_text: str, recent
 
 
 def classify_intent(user_msg: str) -> str:
-    """
-    粗略意圖分類，先分出後面會用到的類型
-    回傳其中一種：
-    - google_bind
-    - calendar_query
-    - calendar_create
-    - memory_forget
-    - chat
-    """
     messages = [
         {
             "role": "system",
@@ -189,7 +161,7 @@ def classify_intent(user_msg: str) -> str:
                 "chat\n\n"
                 "判斷規則：\n"
                 "- 如果是在要求綁定 Google 行事曆，回 google_bind\n"
-                "- 如果是在問今天/明天/某時間有沒有行程，回 calendar_query\n"
+                "- 如果是在問今天/明天/本週/下週/近期/未來有沒有行程，回 calendar_query\n"
                 "- 如果是在要求新增/安排/建立行事曆事件，回 calendar_create\n"
                 "- 如果是在要求忘記、刪除記憶，回 memory_forget\n"
                 "- 其餘一般聊天，回 chat\n"
@@ -220,17 +192,35 @@ def classify_intent(user_msg: str) -> str:
 
 def parse_calendar_query(user_msg: str) -> dict:
     """
-    解析查詢行事曆需求
-    第 1 版先只支援今天
+    回傳格式：
+    {
+        "type": "today | tomorrow | this_week | next_week | upcoming_7_days | upcoming_30_days | unknown"
+    }
     """
     messages = [
         {
             "role": "system",
             "content": (
-                "請解析使用者是否在查詢今天行程。"
-                "如果是，回覆 JSON：{\"type\":\"today\"}"
-                "如果不是，回覆 JSON：{\"type\":\"unknown\"}"
-                "不要輸出其他文字。"
+                "你是一個行事曆查詢解析器。"
+                "請根據使用者的意思，只輸出 JSON，不要輸出其他文字。\n\n"
+                "允許的 type 只有：\n"
+                "- today\n"
+                "- tomorrow\n"
+                "- this_week\n"
+                "- next_week\n"
+                "- upcoming_7_days\n"
+                "- upcoming_30_days\n"
+                "- unknown\n\n"
+                "判斷規則：\n"
+                "- '今天', '今天有什麼會議' => today\n"
+                "- '明天', '明天有什麼安排' => tomorrow\n"
+                "- '這週', '本週', '這星期' => this_week\n"
+                "- '下週', '下星期' => next_week\n"
+                "- '近期', '最近', '未來幾天' => upcoming_7_days\n"
+                "- '未來', '未來有哪些會議', '之後有哪些安排' => upcoming_30_days\n"
+                "- 無法判斷 => unknown\n\n"
+                "範例輸出："
+                '{"type":"this_week"}'
             )
         },
         {
@@ -240,17 +230,19 @@ def parse_calendar_query(user_msg: str) -> dict:
     ]
 
     result = call_openai(messages, temperature=0.0).strip()
+    print("parse_calendar_query raw =", result)
 
     try:
-        return json.loads(result)
+        data = json.loads(result)
+        parsed = {"type": str(data.get("type", "unknown")).strip()}
+        print("parse_calendar_query parsed =", parsed)
+        return parsed
     except Exception:
         return {"type": "unknown"}
 
 
 def parse_calendar_create(user_msg: str) -> dict:
     """
-    解析新增行事曆需求
-
     回傳格式：
     {
         "date": "YYYY-MM-DD",
@@ -258,21 +250,12 @@ def parse_calendar_create(user_msg: str) -> dict:
         "end": "HH:MM",
         "title": "事件名稱"
     }
-
-    重點：
-    1. 以「現在時間」當基準，不要亂用固定年份
-    2. 預設時區為 Asia/Taipei
-    3. 如果使用者只說明天 / 後天，要根據今天推算正確日期
-    4. 如果沒有提供結束時間，預設加 1 小時
     """
-
     now = datetime.now()
     today_str = now.strftime("%Y-%m-%d")
     tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     day_after_tomorrow_str = (now + timedelta(days=2)).strftime("%Y-%m-%d")
     current_year = now.strftime("%Y")
-    current_month = now.strftime("%m")
-    current_day = now.strftime("%d")
 
     messages = [
         {
@@ -283,29 +266,24 @@ def parse_calendar_create(user_msg: str) -> dict:
                 "你只能輸出 JSON，不能輸出其他文字。\n\n"
 
                 "【目前基準時間】\n"
-                f"今天日期是：{today_str}\n"
-                f"明天日期是：{tomorrow_str}\n"
-                f"後天日期是：{day_after_tomorrow_str}\n"
-                f"今年是：{current_year} 年\n"
-                f"今天月日是：{current_month} 月 {current_day} 日\n\n"
+                f"今天日期：{today_str}\n"
+                f"明天日期：{tomorrow_str}\n"
+                f"後天日期：{day_after_tomorrow_str}\n"
+                f"今年：{current_year}\n\n"
 
                 "【輸出格式】\n"
                 '{"date":"YYYY-MM-DD","start":"HH:MM","end":"HH:MM","title":"事件名稱"}\n\n'
 
-                "【解析規則】\n"
-                "1. '今天' 就用今天日期。\n"
-                "2. '明天' 就用明天日期。\n"
-                "3. '後天' 就用後天日期。\n"
-                "4. 若使用者有講明確日期，例如 4月2日、2026/4/2，請轉成 YYYY-MM-DD。\n"
-                "5. 若只有開始時間、沒有結束時間，end 預設為 start 後 1 小時。\n"
-                "6. '下午三點' = 15:00，'上午十點' = 10:00。\n"
-                "7. 若無法解析，請輸出："
+                "【規則】\n"
+                "1. 今天=今天日期，明天=明天日期，後天=後天日期。\n"
+                "2. 這週五、下週一、4月2日、2026/4/2 這些都要解析正確。\n"
+                "3. 下午三點=15:00，上午十點=10:00。\n"
+                "4. 如果只有開始時間沒有結束時間，預設加 1 小時。\n"
+                "5. title 要抓真正事件名稱。\n"
+                "6. 不可以自己亂用舊年份；若沒指定年份，就以目前基準時間推算。\n"
+                "7. 無法解析就輸出："
                 '{"date":"","start":"","end":"","title":""}\n'
                 "8. 預設時區為 Asia/Taipei。\n"
-                "9. 不可以自己亂用 2023、2024 等固定年份，若使用者沒特別說年份，就以目前基準時間推算。\n"
-                "10. title 要精簡，抓出真正事件名稱，例如："
-                "「幫我加上明天下午三點的會議，與微軟開會」"
-                "可輸出 title 為「與微軟開會」。\n"
             )
         },
         {
@@ -319,17 +297,14 @@ def parse_calendar_create(user_msg: str) -> dict:
 
     try:
         data = json.loads(result)
-
         parsed = {
             "date": str(data.get("date", "")).strip(),
             "start": str(data.get("start", "")).strip(),
             "end": str(data.get("end", "")).strip(),
             "title": str(data.get("title", "")).strip()
         }
-
         print("parse_calendar_create parsed =", parsed)
         return parsed
-
     except Exception as e:
         print("parse_calendar_create json error =", str(e))
         return {
