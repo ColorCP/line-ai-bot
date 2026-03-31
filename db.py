@@ -1,44 +1,27 @@
 # ============================================================
 # db.py
 # ============================================================
-# 這支檔案負責：
-# 1. 建立 SQLite 資料庫連線
-# 2. 初始化所有需要的資料表
-# 3. 提供基本資料庫操作函式
-#
-# 目前先建立 4 張表：
-# - messages：短期對話記憶
-# - user_profiles：長期記憶
-# - conversation_summaries：摘要記憶
-# - google_tokens：每位 LINE 使用者綁定自己的 Google OAuth token
-# ============================================================
 
 import sqlite3
 from datetime import datetime
 
 
-# SQLite 資料庫檔名
 DB_PATH = "chat_memory.db"
 
 
 def get_db_connection():
-    """
-    建立並回傳 SQLite 連線
-    """
     conn = sqlite3.connect(DB_PATH)
     return conn
 
 
+def get_now_iso():
+    return datetime.now().isoformat()
+
+
 def init_db():
-    """
-    初始化資料庫與所有資料表
-    """
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # ========================================================
-    # messages：短期對話記憶
-    # ========================================================
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,16 +32,6 @@ def init_db():
         )
     """)
 
-    # ========================================================
-    # user_profiles：長期記憶
-    # memory_type 例如：
-    # - name
-    # - job
-    # - family
-    # - preference
-    # - language
-    # - goal
-    # ========================================================
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_profiles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,9 +42,6 @@ def init_db():
         )
     """)
 
-    # ========================================================
-    # conversation_summaries：對話摘要記憶
-    # ========================================================
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS conversation_summaries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,10 +51,6 @@ def init_db():
         )
     """)
 
-    # ========================================================
-    # google_tokens：每個 LINE user 綁自己的 Google token
-    # 這是未來產品化的重要基礎
-    # ========================================================
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS google_tokens (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,12 +67,185 @@ def init_db():
         )
     """)
 
+    # OAuth state 暫存表
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS google_oauth_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            state TEXT NOT NULL UNIQUE,
+            user_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
     conn.close()
 
 
-def get_now_iso():
-    """
-    回傳現在時間的 ISO 字串格式
-    """
-    return datetime.now().isoformat()
+# ============================================================
+# Google token 資料操作
+# ============================================================
+def save_google_token(
+    user_id: str,
+    access_token: str,
+    refresh_token: str,
+    token_uri: str,
+    client_id: str,
+    client_secret: str,
+    scopes: str,
+    expiry: str
+):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT id
+        FROM google_tokens
+        WHERE user_id = ?
+        LIMIT 1
+    """, (user_id,))
+
+    row = cursor.fetchone()
+
+    if row:
+        cursor.execute("""
+            UPDATE google_tokens
+            SET access_token = ?,
+                refresh_token = ?,
+                token_uri = ?,
+                client_id = ?,
+                client_secret = ?,
+                scopes = ?,
+                expiry = ?,
+                updated_at = ?
+            WHERE user_id = ?
+        """, (
+            access_token,
+            refresh_token,
+            token_uri,
+            client_id,
+            client_secret,
+            scopes,
+            expiry,
+            get_now_iso(),
+            user_id
+        ))
+    else:
+        cursor.execute("""
+            INSERT INTO google_tokens (
+                user_id,
+                access_token,
+                refresh_token,
+                token_uri,
+                client_id,
+                client_secret,
+                scopes,
+                expiry,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id,
+            access_token,
+            refresh_token,
+            token_uri,
+            client_id,
+            client_secret,
+            scopes,
+            expiry,
+            get_now_iso(),
+            get_now_iso()
+        ))
+
+    conn.commit()
+    conn.close()
+
+
+def get_google_token_by_user_id(user_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT access_token, refresh_token, token_uri, client_id, client_secret, scopes, expiry
+        FROM google_tokens
+        WHERE user_id = ?
+        LIMIT 1
+    """, (user_id,))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    return {
+        "access_token": row[0],
+        "refresh_token": row[1],
+        "token_uri": row[2],
+        "client_id": row[3],
+        "client_secret": row[4],
+        "scopes": row[5],
+        "expiry": row[6]
+    }
+
+
+def delete_google_token(user_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        DELETE FROM google_tokens
+        WHERE user_id = ?
+    """, (user_id,))
+
+    conn.commit()
+    conn.close()
+
+
+# ============================================================
+# OAuth state 暫存
+# ============================================================
+def save_oauth_state(state: str, user_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO google_oauth_states (state, user_id, created_at)
+        VALUES (?, ?, ?)
+    """, (state, user_id, get_now_iso()))
+
+    conn.commit()
+    conn.close()
+
+
+def get_user_id_by_oauth_state(state: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT user_id
+        FROM google_oauth_states
+        WHERE state = ?
+        LIMIT 1
+    """, (state,))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    return row[0]
+
+
+def delete_oauth_state(state: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        DELETE FROM google_oauth_states
+        WHERE state = ?
+    """, (state,))
+
+    conn.commit()
+    conn.close()
