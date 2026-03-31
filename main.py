@@ -1,28 +1,30 @@
 # ============================================================
 # main.py
 # ============================================================
-# 第 6 階段（AI 秘書 + AI 意圖判斷 + 天氣查詢版本）
+# 第 8 階段（AI 秘書 + AI 單一動作判斷版本）
 #
 # 功能：
 # 1. LINE webhook 接收訊息
 # 2. 多使用者記憶（DB）
-# 3. OpenAI 自然語言回覆
-# 4. AI 意圖判斷（天氣 / 記憶 / 行事曆 / 綁定）
-# 5. Google OAuth（多使用者）
-# 6. Google Calendar 查詢 / 新增
-# 7. 支援世界天氣查詢（用 OpenAI 解析句子，再查真實天氣）
-# 8. 查天氣不再用 replace 硬拆句子，提升自然度
+# 3. 一般搜尋 / 問答 -> OpenAI Responses API + web search
+# 4. AI 判斷是不是：
+#    - 綁定 Google 行事曆
+#    - 清除記憶
+#    - 查詢行事曆
+#    - 新增行事曆
+#    - 一般聊天 / 搜尋 / 問答
+# 5. 行事曆查完後，下一句可延續分析
+#
+# 設計理念：
+# - AI 負責判斷與理解
+# - 你的程式負責真的執行 Google Calendar API
+# - 這樣既像真正的 AI 助理，又安全可控
 # ============================================================
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 import requests
 import os
-
-# ============================================================
-# 天氣服務模組
-# ============================================================
-from weather_service import get_weather_reply
 
 # ============================================================
 # 自己的模組：資料庫初始化
@@ -44,15 +46,9 @@ from memory_service import (
 # OpenAI 服務
 # ============================================================
 from openai_service import (
-    chat_with_memory,
-    parse_calendar_query,
-    parse_calendar_create
+    parse_assistant_action,
+    call_ai_with_search
 )
-
-# ============================================================
-# 意圖判斷服務
-# ============================================================
-from intent_service import detect_user_intent
 
 # ============================================================
 # Google OAuth 服務
@@ -204,8 +200,9 @@ def google_oauth_callback(code: str, state: str):
                 <ul>
                     <li>幫我看今天行程</li>
                     <li>我這週有哪些會議</li>
-                    <li>後天新增一個會議，與 Google 開會 下午一點</li>
-                    <li>明天東京會下雨嗎</li>
+                    <li>明天下午三點安排與 Google 開會</li>
+                    <li>東京明天天氣如何</li>
+                    <li>今天有什麼科技新聞</li>
                 </ul>
             </body>
         </html>
@@ -269,26 +266,22 @@ async def webhook(request: Request):
                 reply_token,
                 """目前你可以這樣使用我：
 
-【🧠 一般聊天】
-- 問問題、聊天、整理資訊
-
-【🌤 天氣功能】
-- 今天天氣
-- 明天東京會下雨嗎
-- 東京明天天氣
-- 巴黎現在幾度
-- London weather
+【🧠 AI 搜尋 / 問答】
+- 東京明天天氣如何
+- 今天有什麼科技新聞
+- 幫我比較 WRX 跟 Lexus IS
+- 日本滑雪推薦哪裡
+- 幫我整理某個主題
 
 【📅 行事曆功能】
 👉 請先輸入：綁定行事曆
 
-綁定後可以：
+綁定後可以自然地說：
 - 幫我看今天行程
-- 幫我看明天行程
+- 我明天下午有空嗎
 - 我這週有哪些會議
-- 我下週有哪些會議
-- 我未來幾天有哪些安排
 - 明天下午三點安排與微軟開會
+- 後天下午兩點新增家庭聚餐
 
 【🧹 記憶功能】
 - 清除記憶
@@ -306,32 +299,26 @@ async def webhook(request: Request):
 
         try:
             # =================================================
-            # 1. 先用 AI 判斷意圖
+            # 1. AI 先判斷這句話要做什麼
             # =================================================
-            intent = detect_user_intent(user_msg)
-            print("detected intent =", intent)
+            parsed_action = parse_assistant_action(user_msg)
+            print("parsed_action =", parsed_action)
+
+            action = parsed_action.get("action", "general_chat")
 
             # =================================================
-            # 2. 天氣查詢
+            # 2. 清除記憶
             # =================================================
-            if intent == "weather_query":
-                weather_reply = get_weather_reply(user_msg)
-                reply(reply_token, weather_reply)
-                continue
-
-            # =================================================
-            # 3. 清除記憶
-            # =================================================
-            if intent == "memory_forget":
+            if action == "memory_forget":
                 clear_all_user_memory(user_id)
                 clear_calendar_context(user_id)
                 reply(reply_token, "我已經幫你清除記憶")
                 continue
 
             # =================================================
-            # 4. Google 行事曆綁定
+            # 3. Google 行事曆綁定
             # =================================================
-            if intent == "google_bind":
+            if action == "google_bind":
                 if not APP_BASE_URL:
                     reply(reply_token, "系統尚未設定網址")
                     continue
@@ -345,16 +332,14 @@ async def webhook(request: Request):
                 continue
 
             # =================================================
-            # 5. 查詢行事曆
+            # 4. 查詢行事曆
             # =================================================
-            if intent == "calendar_query":
-
-                parsed_query = parse_calendar_query(user_msg)
-                print("parsed_query =", parsed_query)
+            if action == "calendar_query":
+                query_type = parsed_action.get("calendar_query_type", "") or "today"
 
                 query_payload = get_events_payload_by_query(
                     user_id=user_id,
-                    query_type=parsed_query.get("type", "unknown")
+                    query_type=query_type
                 )
 
                 # 儲存最近一次行事曆查詢結果，供下一輪分析使用
@@ -369,57 +354,64 @@ async def webhook(request: Request):
                 continue
 
             # =================================================
-            # 6. 新增行事曆
+            # 5. 新增行事曆
             # =================================================
-            if intent == "calendar_create":
+            if action == "calendar_create":
+                needs_clarification = parsed_action.get("needs_clarification", False)
 
-                parsed = parse_calendar_create(user_msg)
-                print("parsed_calendar_create =", parsed)
+                if needs_clarification:
+                    clarification_question = parsed_action.get("clarification_question", "").strip()
+                    if clarification_question:
+                        reply(reply_token, clarification_question)
+                    else:
+                        reply(reply_token, "我可以幫你新增行程，但我還缺少一些資訊，請再描述清楚一點。")
+                    continue
 
-                if not all([
-                    parsed["date"],
-                    parsed["start"],
-                    parsed["end"],
-                    parsed["title"]
-                ]):
+                date_str = parsed_action.get("date", "").strip()
+                start_str = parsed_action.get("start", "").strip()
+                end_str = parsed_action.get("end", "").strip()
+                title = parsed_action.get("title", "").strip()
+
+                if not all([date_str, start_str, end_str, title]):
                     reply(
                         reply_token,
-                        "我還無法完整解析你的行程，請再說清楚一點，例如：\n"
+                        "我可以幫你新增行程，但我還無法完整解析內容，請再說清楚一點，例如：\n"
                         "後天下午三點安排與 Google 開會"
                     )
                     continue
 
                 result = create_calendar_event(
                     user_id=user_id,
-                    date_str=parsed["date"],
-                    start_str=parsed["start"],
-                    end_str=parsed["end"],
-                    title=parsed["title"]
+                    date_str=date_str,
+                    start_str=start_str,
+                    end_str=end_str,
+                    title=title
                 )
 
                 reply(reply_token, result["message"])
                 continue
 
             # =================================================
-            # 7. 一般聊天（含記憶 + 行事曆短期上下文）
+            # 6. 其他全部走 AI 搜尋 / 問答
             # =================================================
 
-            # 先抽取長期記憶
+            # 6-1. 自動抽取使用者的長期記憶
             auto_extract_and_save_profile_memories(user_id, user_msg)
 
-            # 必要時做摘要記憶
+            # 6-2. 必要時做摘要記憶
             summarize_if_needed(user_id)
 
-            # 建立記憶上下文
+            # 6-3. 建立記憶上下文
             memory_context = build_memory_context(user_id)
 
-            # 若這句話像在延續討論剛剛那份行程，就把最近行事曆結果丟給 AI
+            # 6-4. 若像在延續剛剛查到的行事曆結果，就把上下文給 AI
             calendar_context_text = ""
             if should_use_calendar_context(user_msg):
                 calendar_context_text = build_calendar_context_text(user_id=user_id)
                 print("calendar_context_text =", calendar_context_text)
 
-            ai_reply = chat_with_memory(
+            # 6-5. 呼叫 AI 搜尋 / 問答
+            ai_reply = call_ai_with_search(
                 user_msg=user_msg,
                 profile_text=memory_context["profile_text"],
                 summary_text=memory_context["summary_text"],
@@ -427,11 +419,11 @@ async def webhook(request: Request):
                 calendar_context_text=calendar_context_text
             )
 
-            # 存入對話記錄
+            # 6-6. 存入對話記錄
             save_message(user_id, "user", user_msg)
             save_message(user_id, "assistant", ai_reply)
 
-            # 回覆使用者
+            # 6-7. 回覆
             reply(reply_token, ai_reply)
 
         except Exception as e:
