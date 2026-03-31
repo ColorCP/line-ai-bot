@@ -1,7 +1,7 @@
 # ============================================================
 # main.py
 # ============================================================
-# 第 8 階段（AI 秘書 + AI 單一動作判斷版本）
+# 第 9 階段（AI 秘書 + 專屬功能硬保護版本）
 #
 # 功能：
 # 1. LINE webhook 接收訊息
@@ -13,12 +13,8 @@
 #    - 查詢行事曆
 #    - 新增行事曆
 #    - 一般聊天 / 搜尋 / 問答
-# 5. 行事曆查完後，下一句可延續分析
-#
-# 設計理念：
-# - AI 負責判斷與理解
-# - 你的程式負責真的執行 Google Calendar API
-# - 這樣既像真正的 AI 助理，又安全可控
+# 5. 綁定行事曆先做硬判斷，避免 AI 亂回答 Apple / Outlook
+# 6. 若已綁定 Google 行事曆，直接回覆已綁定
 # ============================================================
 
 from fastapi import FastAPI, Request
@@ -27,9 +23,9 @@ import requests
 import os
 
 # ============================================================
-# 自己的模組：資料庫初始化
+# 自己的模組：資料庫初始化 + Google token 查詢
 # ============================================================
-from db import init_db
+from db import init_db, get_google_token_by_user_id
 
 # ============================================================
 # 記憶服務
@@ -92,7 +88,7 @@ init_db()
 
 
 # ============================================================
-# LINE 回覆函式
+# 工具函式：回覆 LINE
 # ============================================================
 def reply(reply_token: str, text: str):
     """
@@ -124,6 +120,43 @@ def reply(reply_token: str, text: str):
 
     print("LINE reply status =", response.status_code)
     print("LINE reply body =", response.text)
+
+
+# ============================================================
+# 工具函式：判斷是否為綁定 Google 行事曆意圖（硬判斷）
+# 說明：
+# 這些句子不應該丟給一般 AI 回答，否則容易亂講 Apple/Outlook
+# ============================================================
+def is_google_bind_request(user_msg: str) -> bool:
+    text = (user_msg or "").strip().lower()
+
+    bind_keywords = [
+        "綁定行事曆",
+        "綁定 google 行事曆",
+        "綁定google行事曆",
+        "連接 google 行事曆",
+        "連接google行事曆",
+        "google行事曆綁定",
+        "綁定google calendar",
+        "google calendar綁定"
+    ]
+
+    return any(keyword.lower() in text for keyword in bind_keywords)
+
+
+# ============================================================
+# 工具函式：判斷是否已綁定 Google 行事曆
+# ============================================================
+def is_google_calendar_bound(user_id: str) -> bool:
+    """
+    只檢查 DB 裡是否已有此 user_id 的 Google token
+    """
+    try:
+        token_data = get_google_token_by_user_id(user_id)
+        return token_data is not None
+    except Exception as e:
+        print("is_google_calendar_bound error =", str(e))
+        return False
 
 
 # ============================================================
@@ -273,7 +306,8 @@ async def webhook(request: Request):
 - 日本滑雪推薦哪裡
 - 幫我整理某個主題
 
-【📅 行事曆功能】
+【📅 Google 行事曆功能】
+👉 目前只支援 Google 行事曆
 👉 請先輸入：綁定行事曆
 
 綁定後可以自然地說：
@@ -299,6 +333,37 @@ async def webhook(request: Request):
 
         try:
             # =================================================
+            # 0. 綁定 Google 行事曆：先做硬保護
+            # 說明：
+            # 避免一般 AI 回答亂扯 Apple / Outlook / 裝置同步
+            # =================================================
+            if is_google_bind_request(user_msg):
+                if not APP_BASE_URL:
+                    reply(reply_token, "系統尚未設定網址")
+                    continue
+
+                # 已綁定
+                if is_google_calendar_bound(user_id):
+                    reply(
+                        reply_token,
+                        "你已經綁定 Google 行事曆了。\n"
+                        "你現在可以直接問我：\n"
+                        "- 幫我看今天行程\n"
+                        "- 我這週有哪些會議\n"
+                        "- 明天下午三點安排與 Google 開會"
+                    )
+                    continue
+
+                # 尚未綁定
+                bind_url = f"{APP_BASE_URL}/google/oauth/start?user_id={user_id}"
+
+                reply(
+                    reply_token,
+                    f"請點擊以下連結綁定 Google 行事曆：\n{bind_url}"
+                )
+                continue
+
+            # =================================================
             # 1. AI 先判斷這句話要做什麼
             # =================================================
             parsed_action = parse_assistant_action(user_msg)
@@ -316,18 +381,26 @@ async def webhook(request: Request):
                 continue
 
             # =================================================
-            # 3. Google 行事曆綁定
+            # 3. Google 行事曆綁定（AI 解析到的情況）
             # =================================================
             if action == "google_bind":
                 if not APP_BASE_URL:
                     reply(reply_token, "系統尚未設定網址")
                     continue
 
+                if is_google_calendar_bound(user_id):
+                    reply(
+                        reply_token,
+                        "你已經綁定 Google 行事曆了。\n"
+                        "你可以直接叫我幫你查或新增行程。"
+                    )
+                    continue
+
                 bind_url = f"{APP_BASE_URL}/google/oauth/start?user_id={user_id}"
 
                 reply(
                     reply_token,
-                    f"點擊綁定 Google 行事曆：\n{bind_url}"
+                    f"請點擊以下連結綁定 Google 行事曆：\n{bind_url}"
                 )
                 continue
 
@@ -394,23 +467,16 @@ async def webhook(request: Request):
             # =================================================
             # 6. 其他全部走 AI 搜尋 / 問答
             # =================================================
-
-            # 6-1. 自動抽取使用者的長期記憶
             auto_extract_and_save_profile_memories(user_id, user_msg)
-
-            # 6-2. 必要時做摘要記憶
             summarize_if_needed(user_id)
 
-            # 6-3. 建立記憶上下文
             memory_context = build_memory_context(user_id)
 
-            # 6-4. 若像在延續剛剛查到的行事曆結果，就把上下文給 AI
             calendar_context_text = ""
             if should_use_calendar_context(user_msg):
                 calendar_context_text = build_calendar_context_text(user_id=user_id)
                 print("calendar_context_text =", calendar_context_text)
 
-            # 6-5. 呼叫 AI 搜尋 / 問答
             ai_reply = call_ai_with_search(
                 user_msg=user_msg,
                 profile_text=memory_context["profile_text"],
@@ -419,11 +485,9 @@ async def webhook(request: Request):
                 calendar_context_text=calendar_context_text
             )
 
-            # 6-6. 存入對話記錄
             save_message(user_id, "user", user_msg)
             save_message(user_id, "assistant", ai_reply)
 
-            # 6-7. 回覆
             reply(reply_token, ai_reply)
 
         except Exception as e:
