@@ -58,14 +58,26 @@ def get_now_iso():
 def init_db():
     """
     初始化所有需要的資料表
-    如果表不存在就建立
+    這個版本會直接重建資料表
+    適合目前開發測試階段使用
     """
+
     conn = get_conn()
     cursor = conn.cursor()
 
-    # --------------------------------------------------------
+    # ========================================================
+    # ⚠️ 開發階段：直接刪除舊表，避免欄位不一致
+    # ========================================================
+    cursor.execute("DROP TABLE IF EXISTS messages")
+    cursor.execute("DROP TABLE IF EXISTS memories")
+    cursor.execute("DROP TABLE IF EXISTS summaries")
+    cursor.execute("DROP TABLE IF EXISTS conversation_summaries")
+    cursor.execute("DROP TABLE IF EXISTS oauth_states")
+    cursor.execute("DROP TABLE IF EXISTS google_tokens")
+
+    # ========================================================
     # 聊天訊息表
-    # --------------------------------------------------------
+    # ========================================================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,9 +88,9 @@ def init_db():
     )
     """)
 
-    # --------------------------------------------------------
+    # ========================================================
     # 使用者個人記憶表
-    # --------------------------------------------------------
+    # ========================================================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS memories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,10 +100,9 @@ def init_db():
     )
     """)
 
-    # --------------------------------------------------------
+    # ========================================================
     # 新版摘要表
-    # 同時保留 summary / summary_text，避免舊程式與新程式衝突
-    # --------------------------------------------------------
+    # ========================================================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS summaries (
         user_id TEXT PRIMARY KEY,
@@ -101,10 +112,9 @@ def init_db():
     )
     """)
 
-    # --------------------------------------------------------
+    # ========================================================
     # 舊版摘要表（相容舊程式）
-    # 很多舊程式會讀這張表
-    # --------------------------------------------------------
+    # ========================================================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS conversation_summaries (
         user_id TEXT PRIMARY KEY,
@@ -114,11 +124,9 @@ def init_db():
     )
     """)
 
-    # --------------------------------------------------------
+    # ========================================================
     # Google OAuth state 表
-    # 這次修正重點：
-    # 除了 state 和 user_id，還要存 code_verifier
-    # --------------------------------------------------------
+    # ========================================================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS oauth_states (
         state TEXT PRIMARY KEY,
@@ -128,9 +136,9 @@ def init_db():
     )
     """)
 
-    # --------------------------------------------------------
+    # ========================================================
     # Google token 表
-    # --------------------------------------------------------
+    # ========================================================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS google_tokens (
         user_id TEXT PRIMARY KEY,
