@@ -1,18 +1,12 @@
 # ============================================================
 # openai_service.py
 # ============================================================
-# 這支檔案專門負責：
+# 功能：
 # 1. 呼叫 OpenAI API
 # 2. 提供一般聊天回覆
 # 3. 提供記憶抽取
 # 4. 提供意圖判斷
 # 5. 提供行事曆查詢 / 新增解析
-#
-# 後面如果你要換模型、改參數，
-# 集中改這裡就好，不用去 main.py 到處改。
-# ============================================================
-# ============================================================
-# openai_service.py
 # ============================================================
 
 import os
@@ -25,6 +19,10 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
 def call_openai(messages: list, temperature: float = 0.3) -> str:
+    """
+    通用 OpenAI 呼叫函式
+    messages 要符合 Chat Completions 格式
+    """
     if not OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY 尚未設定")
 
@@ -49,6 +47,9 @@ def call_openai(messages: list, temperature: float = 0.3) -> str:
 
 
 def extract_profile_memories_from_text(user_msg: str) -> list:
+    """
+    從使用者輸入中抽取可長期記憶的資訊
+    """
     messages = [
         {
             "role": "system",
@@ -102,6 +103,9 @@ def extract_profile_memories_from_text(user_msg: str) -> list:
 
 
 def summarize_messages_for_memory(old_messages: list) -> str:
+    """
+    將較舊對話整理成摘要
+    """
     text_lines = []
 
     for item in old_messages:
@@ -129,15 +133,32 @@ def summarize_messages_for_memory(old_messages: list) -> str:
     return call_openai(messages, temperature=0.2).strip()
 
 
-def chat_with_memory(user_msg: str, profile_text: str, summary_text: str, recent_messages: list) -> str:
+def chat_with_memory(
+    user_msg: str,
+    profile_text: str,
+    summary_text: str,
+    recent_messages: list,
+    calendar_context_text: str = ""
+) -> str:
+    """
+    使用記憶上下文進行聊天回覆
+    若有最近一次行事曆查詢結果，也一起提供給 AI
+    """
+    extra_calendar_text = ""
+    if calendar_context_text:
+        extra_calendar_text = f"\n\n{calendar_context_text}\n"
+
     system_prompt = {
         "role": "system",
         "content": (
             "你是一位貼心、清楚、使用繁體中文回答的 AI 助理。\n"
             "你要優先根據提供的長期記憶、摘要記憶、近期對話來回覆。\n"
+            "如果有提供最近一次行事曆查詢結果，代表使用者很可能正在延續討論那份行程。\n"
+            "例如使用者問：這行程會不會太緊、哪天比較空、這樣安排合理嗎，你要根據那份行程分析。\n"
             "如果記憶中沒有，就不要亂編。\n\n"
             f"【長期記憶】\n{profile_text}\n\n"
             f"【摘要記憶】\n{summary_text}\n"
+            f"{extra_calendar_text}"
         )
     }
 
@@ -149,6 +170,9 @@ def chat_with_memory(user_msg: str, profile_text: str, summary_text: str, recent
 
 
 def classify_intent(user_msg: str) -> str:
+    """
+    粗略意圖分類
+    """
     messages = [
         {
             "role": "system",
@@ -192,10 +216,7 @@ def classify_intent(user_msg: str) -> str:
 
 def parse_calendar_query(user_msg: str) -> dict:
     """
-    回傳格式：
-    {
-        "type": "today | tomorrow | this_week | next_week | upcoming_7_days | upcoming_30_days | unknown"
-    }
+    解析行事曆查詢範圍
     """
     messages = [
         {
@@ -219,8 +240,7 @@ def parse_calendar_query(user_msg: str) -> dict:
                 "- '近期', '最近', '未來幾天' => upcoming_7_days\n"
                 "- '未來', '未來有哪些會議', '之後有哪些安排' => upcoming_30_days\n"
                 "- 無法判斷 => unknown\n\n"
-                "範例輸出："
-                '{"type":"this_week"}'
+                '範例輸出：{"type":"this_week"}'
             )
         },
         {
@@ -243,6 +263,7 @@ def parse_calendar_query(user_msg: str) -> dict:
 
 def parse_calendar_create(user_msg: str) -> dict:
     """
+    解析新增行事曆需求
     回傳格式：
     {
         "date": "YYYY-MM-DD",
@@ -281,8 +302,7 @@ def parse_calendar_create(user_msg: str) -> dict:
                 "4. 如果只有開始時間沒有結束時間，預設加 1 小時。\n"
                 "5. title 要抓真正事件名稱。\n"
                 "6. 不可以自己亂用舊年份；若沒指定年份，就以目前基準時間推算。\n"
-                "7. 無法解析就輸出："
-                '{"date":"","start":"","end":"","title":""}\n'
+                '7. 無法解析就輸出：{"date":"","start":"","end":"","title":""}\n'
                 "8. 預設時區為 Asia/Taipei。\n"
             )
         },
