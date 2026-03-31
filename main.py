@@ -19,9 +19,12 @@
 # 目前 Google OAuth / Calendar 還是占位訊息，
 # 第 3 階段會正式接上。
 # ============================================================
+# ============================================================
+# main.py
+# ============================================================
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 import requests
 import os
 
@@ -33,27 +36,32 @@ from memory_service import (
     auto_extract_and_save_profile_memories,
     summarize_if_needed
 )
-from openai_service import chat_with_memory
+from openai_service import (
+    chat_with_memory,
+    parse_calendar_query,
+    parse_calendar_create
+)
 from intent_service import detect_user_intent
-from google_oauth_service import build_google_bind_message
+from google_oauth_service import (
+    build_google_oauth_start_url,
+    exchange_code_and_save_token
+)
 from calendar_service import (
-    handle_calendar_query_placeholder,
-    handle_calendar_create_placeholder
+    get_today_events_text,
+    create_calendar_event
 )
 
 
 app = FastAPI()
 
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+APP_BASE_URL = os.getenv("APP_BASE_URL")
 
 
 init_db()
 
 
 def reply(reply_token: str, text: str):
-    """
-    回覆 LINE 訊息
-    """
     url = "https://api.line.me/v2/bot/message/reply"
 
     headers = {
@@ -77,17 +85,61 @@ def reply(reply_token: str, text: str):
 
 @app.get("/")
 def root():
-    """
-    健康檢查 API
-    """
     return {"status": "ok"}
+
+
+@app.get("/google/oauth/start")
+def google_oauth_start(user_id: str):
+    """
+    產生 Google OAuth 綁定網址
+    """
+    if not APP_BASE_URL:
+        return JSONResponse({"error": "APP_BASE_URL 尚未設定"}, status_code=500)
+
+    try:
+        auth_url = build_google_oauth_start_url(user_id=user_id, base_url=APP_BASE_URL)
+        return JSONResponse({"auth_url": auth_url})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/google/oauth/callback")
+def google_oauth_callback(code: str, state: str):
+    """
+    Google 授權完成後的 callback
+    """
+    if not APP_BASE_URL:
+        return HTMLResponse("<h1>APP_BASE_URL 尚未設定</h1>", status_code=500)
+
+    try:
+        user_id = exchange_code_and_save_token(
+            code=code,
+            state=state,
+            base_url=APP_BASE_URL
+        )
+
+        return HTMLResponse(f"""
+        <html>
+            <body style="font-family: Arial; padding: 40px;">
+                <h2>Google 行事曆綁定成功</h2>
+                <p>LINE 使用者 ID：{user_id}</p>
+                <p>你現在可以回到 LINE，直接使用自然語言查詢或新增行事曆。</p>
+            </body>
+        </html>
+        """)
+    except Exception as e:
+        return HTMLResponse(f"""
+        <html>
+            <body style="font-family: Arial; padding: 40px;">
+                <h2>Google 行事曆綁定失敗</h2>
+                <p>{str(e)}</p>
+            </body>
+        </html>
+        """, status_code=500)
 
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    """
-    LINE webhook 入口
-    """
     body = await request.json()
     print("Webhook body:", body)
 
@@ -111,72 +163,71 @@ async def webhook(request: Request):
             continue
 
         try:
-            # ====================================================
-            # 1. 意圖判斷
-            # ====================================================
             intent = detect_user_intent(user_msg)
 
-            # ====================================================
-            # 2. 特殊意圖先處理
-            # ====================================================
             if intent == "memory_forget":
                 clear_all_user_memory(user_id)
                 reply(reply_token, "我已經幫你清除目前的記憶。")
                 continue
 
             if intent == "google_bind":
-                bind_message = build_google_bind_message()
-                reply(reply_token, bind_message)
+                if not APP_BASE_URL:
+                    reply(reply_token, "系統尚未完成 Google 綁定網址設定。")
+                    continue
+
+                bind_url = f"{APP_BASE_URL}/google/oauth/start?user_id={user_id}"
+                reply(reply_token, f"請點這個連結完成 Google 行事曆綁定：\n{bind_url}")
                 continue
 
             if intent == "calendar_query":
-                result_text = handle_calendar_query_placeholder()
-                reply(reply_token, result_text)
+                parsed = parse_calendar_query(user_msg)
+
+                if parsed.get("type") == "today":
+                    result_text = get_today_events_text(user_id)
+                    reply(reply_token, result_text)
+                    continue
+
+                reply(reply_token, "目前先支援查詢今天行程。")
                 continue
 
             if intent == "calendar_create":
-                result_text = handle_calendar_create_placeholder()
-                reply(reply_token, result_text)
+                parsed = parse_calendar_create(user_msg)
+
+                date_str = parsed.get("date", "")
+                start_str = parsed.get("start", "")
+                end_str = parsed.get("end", "")
+                title = parsed.get("title", "")
+
+                if not date_str or not start_str or not end_str or not title:
+                    reply(reply_token, "我目前無法完整解析你的行程內容，請再說得更明確一些。")
+                    continue
+
+                result = create_calendar_event(
+                    user_id=user_id,
+                    date_str=date_str,
+                    start_str=start_str,
+                    end_str=end_str,
+                    title=title
+                )
+
+                reply(reply_token, result["message"])
                 continue
 
-            # ====================================================
-            # 3. 一般聊天：先抽長期記憶
-            # ====================================================
             auto_extract_and_save_profile_memories(user_id, user_msg)
-
-            # ====================================================
-            # 4. 對話太多就做摘要
-            # ====================================================
             summarize_if_needed(user_id)
 
-            # ====================================================
-            # 5. 組合記憶內容
-            # ====================================================
             memory_context = build_memory_context(user_id)
 
-            profile_text = memory_context["profile_text"]
-            summary_text = memory_context["summary_text"]
-            recent_messages = memory_context["recent_messages"]
-
-            # ====================================================
-            # 6. 產生 AI 回答
-            # ====================================================
             ai_reply = chat_with_memory(
                 user_msg=user_msg,
-                profile_text=profile_text,
-                summary_text=summary_text,
-                recent_messages=recent_messages
+                profile_text=memory_context["profile_text"],
+                summary_text=memory_context["summary_text"],
+                recent_messages=memory_context["recent_messages"]
             )
 
-            # ====================================================
-            # 7. 存回對話記錄
-            # ====================================================
             save_message(user_id, "user", user_msg)
             save_message(user_id, "assistant", ai_reply)
 
-            # ====================================================
-            # 8. 回覆 LINE
-            # ====================================================
             reply(reply_token, ai_reply)
 
         except Exception as e:
