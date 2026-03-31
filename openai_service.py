@@ -8,11 +8,11 @@
 # 4. 記憶抽取 -> 提供給 memory_service.py 使用
 # 5. 記憶摘要 -> 提供給 memory_service.py 使用
 #
-# 說明：
-# - 這份是整合版
-# - 保留 memory_service 需要的函式
-# - 同時加上 AI 上網搜尋功能
-# - 目前只支援 Google 行事曆
+# 升級重點：
+# 1. 支援特定日期查詢（例如：5/1 我有要去澎湖嗎）
+# 2. 支援多天全天事件（例如：5/1 去澎湖三天）
+# 3. 支援延續型追問（例如：下個月呢？）
+# 4. 目前只支援 Google 行事曆
 # ============================================================
 
 import os
@@ -84,9 +84,111 @@ def format_recent_messages(recent_messages) -> str:
 
 
 # ============================================================
+# 工具函式：清理日期字串，只保留 YYYY-MM-DD
+# ============================================================
+def normalize_date_string(value: str) -> str:
+    """
+    將模型可能回傳的日期格式統一成 YYYY-MM-DD
+    例如：
+    - 2026-05-01
+    - 2026-05-01T00:00:00
+    - 2026-05-01 00:00:00
+    """
+    value = (value or "").strip()
+
+    if not value:
+        return ""
+
+    if "T" in value:
+        value = value.split("T")[0].strip()
+
+    if " " in value:
+        value = value.split(" ")[0].strip()
+
+    if len(value) >= 10:
+        value = value[:10]
+
+    return value
+
+
+# ============================================================
+# 工具函式：清理時間字串，只保留 HH:MM
+# ============================================================
+def normalize_time_string(value: str) -> str:
+    """
+    將模型可能回傳的時間格式統一成 HH:MM
+    """
+    value = (value or "").strip()
+
+    if not value:
+        return ""
+
+    if "T" in value:
+        value = value.split("T")[-1].strip()
+
+    if " " in value:
+        value = value.split(" ")[-1].strip()
+
+    # 若有秒數，去掉秒
+    parts = value.split(":")
+    if len(parts) >= 2:
+        hour = parts[0].strip()
+        minute = parts[1].strip()
+
+        try:
+            hour_int = int(hour)
+            minute_int = int(minute)
+
+            if hour_int < 0:
+                hour_int = 0
+            if hour_int > 23:
+                hour_int = 23
+
+            if minute_int < 0:
+                minute_int = 0
+            if minute_int > 59:
+                minute_int = 59
+
+            return f"{hour_int:02d}:{minute_int:02d}"
+        except Exception:
+            return ""
+
+    return ""
+
+
+# ============================================================
+# 工具函式：若只有開始時間，推算結束時間
+# 特別處理 23:00 不能直接 +1 變成 24:00
+# ============================================================
+def infer_end_time(start_str: str) -> str:
+    """
+    根據開始時間推算結束時間
+    規則：
+    - 一般情況 +1 小時
+    - 若開始為 23:00~23:59，則結束設成 23:59
+    """
+    start_str = normalize_time_string(start_str)
+
+    if not start_str:
+        return ""
+
+    try:
+        hour = int(start_str.split(":")[0])
+        minute = int(start_str.split(":")[1])
+
+        if hour == 23:
+            return "23:59"
+
+        end_dt = datetime(2000, 1, 1, hour, minute) + timedelta(hours=1)
+        return end_dt.strftime("%H:%M")
+    except Exception:
+        return ""
+
+
+# ============================================================
 # AI 單一入口：判斷使用者要做什麼
 # ============================================================
-def parse_assistant_action(user_msg: str) -> dict:
+def parse_assistant_action(user_msg: str, calendar_context_text: str = "") -> dict:
     """
     AI 單一判斷入口
 
@@ -94,12 +196,22 @@ def parse_assistant_action(user_msg: str) -> dict:
     {
       "action": "general_chat" | "google_bind" | "memory_forget" |
                 "calendar_query" | "calendar_create",
-      "calendar_query_type": "today" | "tomorrow" | "this_week" |
-                             "next_week" | "recent" | "future",
+
+      "calendar_query_type": "" | "today" | "tomorrow" | "this_week" |
+                             "next_week" | "recent" | "future" |
+                             "this_month" | "next_month" | "exact_date",
+
+      "query_date": "YYYY-MM-DD",
+
       "date": "YYYY-MM-DD",
       "start": "HH:MM",
       "end": "HH:MM",
       "title": "",
+
+      "all_day": false,
+      "start_date": "",
+      "end_date": "",
+
       "reply_hint": "",
       "needs_clarification": false,
       "clarification_question": ""
@@ -109,6 +221,7 @@ def parse_assistant_action(user_msg: str) -> dict:
     today_str = now.strftime("%Y-%m-%d")
     tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     day_after_tomorrow_str = (now + timedelta(days=2)).strftime("%Y-%m-%d")
+    current_year = now.year
 
     system_prompt = f"""
 你是 AI 秘書的動作判斷器。
@@ -127,22 +240,49 @@ def parse_assistant_action(user_msg: str) -> dict:
 1. 目前系統只支援 Google 行事曆
 2. 不支援 Apple 行事曆、Outlook 行事曆、iCloud 行事曆、手機內建行事曆
 3. 如果使用者說「綁定行事曆」，就是綁定 Google 行事曆，不能延伸回答到其他平台
-4. 問天氣、新聞、搜尋、產品比較、一般知識、旅遊、時事、聊天，一律是 general_chat
-5. 「幫我看今天行程」「我這週有哪些會議」「我明天下午有空嗎」這類，是 calendar_query
-6. 「明天下午三點安排與 Google 開會」這類，是 calendar_create
-7. 如果是 calendar_create，請盡可能解析 date/start/end/title
-8. 如果只知道開始時間但沒說結束時間，預設 end = start + 1 小時
-9. 若 calendar_create 缺少必要資訊，請設 needs_clarification = true
-10. calendar_query_type 只能是：
-   - "today"
-   - "tomorrow"
-   - "this_week"
-   - "next_week"
-   - "recent"
-   - "future"
-11. 若不是 calendar_query，calendar_query_type 請給空字串
-12. 若不是 calendar_create，date/start/end/title 請給空字串
-13. 若不需要追問，clarification_question 給空字串
+
+行事曆判斷規則：
+4. 「幫我看今天行程」「我這週有哪些會議」「我明天下午有空嗎」「5/1 我有要去澎湖嗎」這類，是 calendar_query
+5. 「明天下午三點安排與 Google 開會」「我5/1加入去澎湖三天」這類，是 calendar_create
+6. 若句子很短，例如「下個月呢？」「那明天呢？」，但有提供 calendar_context_text，請優先視為延續上一輪行事曆查詢
+
+calendar_query_type 只能是：
+- ""
+- "today"
+- "tomorrow"
+- "this_week"
+- "next_week"
+- "recent"
+- "future"
+- "this_month"
+- "next_month"
+- "exact_date"
+
+行事曆查詢補充規則：
+7. 若是查某一個明確日期，例如「5/1 我有要去澎湖嗎」「2026/5/1 有行程嗎」，請：
+   - action = "calendar_query"
+   - calendar_query_type = "exact_date"
+   - query_date = 對應日期
+8. 若月份日期未寫年份，例如 5/1，預設使用 {current_year} 年
+9. 若不是 exact_date，query_date 請給空字串
+
+行事曆建立補充規則：
+10. 若是一般單日事件，請填：
+   - date
+   - start
+   - end
+   - title
+11. 若是多天旅行 / 多天活動，例如「5/1 去澎湖三天」，請填：
+   - all_day = true
+   - start_date = 2026-05-01
+   - end_date = 2026-05-03
+   - title = 去澎湖
+12. 多天事件的 end_date 代表最後一天（含當天）
+13. 若只知道開始時間但沒說結束時間，請預設 end = start + 1 小時
+14. 若開始時間是 23:00 左右，不可輸出 24:00，請改成 23:59
+15. 若不是 calendar_create，date/start/end/title/all_day/start_date/end_date 請給空值或 false
+16. 若需要追問，needs_clarification = true，並寫 clarification_question
+17. 若不需要追問，clarification_question 給空字串
 
 今天日期（Asia/Taipei）：
 - 今天：{today_str}
@@ -151,19 +291,26 @@ def parse_assistant_action(user_msg: str) -> dict:
 """.strip()
 
     user_prompt = f"""
-請解析以下使用者輸入，並只輸出 JSON：
+請解析以下使用者輸入，並只輸出 JSON。
 
-使用者輸入：
+【最近一次行事曆上下文】
+{calendar_context_text or "（無）"}
+
+【使用者輸入】
 {user_msg}
 
 輸出格式：
 {{
   "action": "general_chat",
   "calendar_query_type": "",
+  "query_date": "",
   "date": "",
   "start": "",
   "end": "",
   "title": "",
+  "all_day": false,
+  "start_date": "",
+  "end_date": "",
   "reply_hint": "",
   "needs_clarification": false,
   "clarification_question": ""
@@ -173,10 +320,14 @@ def parse_assistant_action(user_msg: str) -> dict:
     fallback = {
         "action": "general_chat",
         "calendar_query_type": "",
+        "query_date": "",
         "date": "",
         "start": "",
         "end": "",
         "title": "",
+        "all_day": False,
+        "start_date": "",
+        "end_date": "",
         "reply_hint": "",
         "needs_clarification": False,
         "clarification_question": ""
@@ -196,10 +347,17 @@ def parse_assistant_action(user_msg: str) -> dict:
 
         action = str(data.get("action", "general_chat")).strip()
         calendar_query_type = str(data.get("calendar_query_type", "")).strip()
-        date = str(data.get("date", "")).strip()
-        start = str(data.get("start", "")).strip()
-        end = str(data.get("end", "")).strip()
+        query_date = normalize_date_string(str(data.get("query_date", "")).strip())
+
+        date = normalize_date_string(str(data.get("date", "")).strip())
+        start = normalize_time_string(str(data.get("start", "")).strip())
+        end = normalize_time_string(str(data.get("end", "")).strip())
         title = str(data.get("title", "")).strip()
+
+        all_day = bool(data.get("all_day", False))
+        start_date = normalize_date_string(str(data.get("start_date", "")).strip())
+        end_date = normalize_date_string(str(data.get("end_date", "")).strip())
+
         reply_hint = str(data.get("reply_hint", "")).strip()
         needs_clarification = bool(data.get("needs_clarification", False))
         clarification_question = str(data.get("clarification_question", "")).strip()
@@ -219,7 +377,10 @@ def parse_assistant_action(user_msg: str) -> dict:
             "this_week",
             "next_week",
             "recent",
-            "future"
+            "future",
+            "this_month",
+            "next_month",
+            "exact_date"
         }
 
         if action not in allowed_actions:
@@ -228,13 +389,22 @@ def parse_assistant_action(user_msg: str) -> dict:
         if calendar_query_type not in allowed_query_types:
             calendar_query_type = ""
 
+        # 若是單日建立事件但沒有 end，幫它補
+        if action == "calendar_create" and (not all_day):
+            if start and not end:
+                end = infer_end_time(start)
+
         return {
             "action": action,
             "calendar_query_type": calendar_query_type,
+            "query_date": query_date,
             "date": date,
             "start": start,
             "end": end,
             "title": title,
+            "all_day": all_day,
+            "start_date": start_date,
+            "end_date": end_date,
             "reply_hint": reply_hint,
             "needs_clarification": needs_clarification,
             "clarification_question": clarification_question
@@ -257,11 +427,6 @@ def call_ai_with_search(
 ) -> str:
     """
     一般聊天主函式
-
-    說明：
-    - 使用 Responses API
-    - 開啟 web search
-    - 一般問答、搜尋、天氣、新聞、比較、旅遊等都從這裡走
     """
     recent_text = format_recent_messages(recent_messages)
 
@@ -327,13 +492,6 @@ def call_ai_with_search(
 def extract_profile_memories_from_text(user_text: str):
     """
     從使用者輸入中抽取適合長期保存的個人資訊
-
-    回傳 list[str]
-    例如：
-    [
-        "使用者喜歡 Lexus IS",
-        "使用者有一隻貓叫咪咪"
-    ]
     """
     system_prompt = """
 你是記憶抽取器。
@@ -394,7 +552,6 @@ def extract_profile_memories_from_text(user_text: str):
 def summarize_messages_for_memory(messages) -> str:
     """
     將一批對話訊息摘要成較短的記憶摘要
-    messages 格式預期為 list[dict]
     """
     if not messages:
         return ""
@@ -440,8 +597,7 @@ def summarize_messages_for_memory(messages) -> str:
 
 
 # ============================================================
-# 相容舊名稱：如果其他地方還在呼叫 chat_with_memory
-# 就轉接到新的 call_ai_with_search
+# 相容舊名稱
 # ============================================================
 def chat_with_memory(
     user_msg: str,
@@ -450,9 +606,6 @@ def chat_with_memory(
     recent_messages=None,
     calendar_context_text: str = ""
 ) -> str:
-    """
-    舊介面相容層
-    """
     return call_ai_with_search(
         user_msg=user_msg,
         profile_text=profile_text,
@@ -462,27 +615,13 @@ def chat_with_memory(
     )
 
 
-# ============================================================
-# 相容舊名稱：如果舊版程式還在呼叫 parse_calendar_query
-# 就轉接到 parse_assistant_action 的結果
-# ============================================================
 def parse_calendar_query(user_msg: str) -> dict:
-    """
-    舊介面相容層
-    """
     parsed = parse_assistant_action(user_msg)
     query_type = parsed.get("calendar_query_type", "") or "today"
     return {"type": query_type}
 
 
-# ============================================================
-# 相容舊名稱：如果舊版程式還在呼叫 parse_calendar_create
-# 就轉接到 parse_assistant_action 的結果
-# ============================================================
 def parse_calendar_create(user_msg: str) -> dict:
-    """
-    舊介面相容層
-    """
     parsed = parse_assistant_action(user_msg)
     return {
         "date": parsed.get("date", ""),
