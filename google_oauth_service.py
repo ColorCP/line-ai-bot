@@ -4,9 +4,9 @@
 # 功能：
 # 1. 從 Railway 環境變數讀取 Google OAuth 設定
 # 2. 建立 Google OAuth 授權網址
-# 3. 使用 PKCE 流程（會產生 code_verifier）
+# 3. 使用 PKCE 流程（產生 code_verifier）
 # 4. 將 state + user_id + code_verifier 存進資料庫
-# 5. Google callback 回來後，用 code + code_verifier 換 token
+# 5. Google callback 回來後，用 code 換 token
 # 6. 將 Google token 存進資料庫
 # ============================================================
 
@@ -23,6 +23,7 @@ from db import (
     save_google_token
 )
 
+# Google Calendar 權限
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/calendar"
 ]
@@ -31,7 +32,8 @@ GOOGLE_SCOPES = [
 def get_google_client_config():
     """
     從 Railway 環境變數讀取 Google OAuth 設定 JSON
-    環境變數名稱：GOOGLE_CREDENTIALS_JSON
+    環境變數名稱：
+    GOOGLE_CREDENTIALS_JSON
     """
     raw = os.getenv("GOOGLE_CREDENTIALS_JSON")
 
@@ -54,20 +56,31 @@ def build_google_oauth_start_url(user_id: str, base_url: str) -> str:
     建立 Google OAuth 授權連結
     """
 
+    print("====================================================")
+    print("=== GOOGLE OAUTH SERVICE NEW VERSION LOADED ========")
+    print("=== PKCE FIX APPLIED ================================")
+    print("====================================================")
+
     client_config = get_google_client_config()
 
+    # 防 CSRF
     state = secrets.token_urlsafe(32)
+
+    # PKCE verifier
     code_verifier = secrets.token_urlsafe(64)
 
+    # 存 DB
     save_oauth_state(
         state=state,
         user_id=user_id,
         code_verifier=code_verifier
     )
 
+    # callback
     redirect_uri = f"{base_url}/google/oauth/callback"
 
-    # 重點：code_verifier 放在這裡
+    # 重點：
+    # code_verifier 要放在 Flow 建立時，不要直接丟進 authorization_url()
     flow = Flow.from_client_config(
         client_config=client_config,
         scopes=GOOGLE_SCOPES,
@@ -77,19 +90,33 @@ def build_google_oauth_start_url(user_id: str, base_url: str) -> str:
 
     flow.redirect_uri = redirect_uri
 
-    # 重點：這裡不要再傳 code_verifier
-    authorization_url, _ = flow.authorization_url(
+    # 重點：
+    # 這裡絕對不要再傳 code_verifier
+    authorization_url, returned_state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent"
     )
 
+    # Debug
     print("========== Google OAuth Start ==========")
     print("user_id =", user_id)
     print("base_url =", base_url)
     print("redirect_uri =", redirect_uri)
-    print("state =", state)
-    print("authorization_url =", authorization_url)
+    print("state(saved) =", state)
+    print("state(returned) =", returned_state)
+    print("AUTH URL =", authorization_url)
+
+    if "code_verifier=" in authorization_url:
+        print("!!! ERROR: AUTH URL STILL CONTAINS code_verifier !!!")
+    else:
+        print("OK: AUTH URL DOES NOT CONTAIN code_verifier")
+
+    if "code_challenge=" in authorization_url:
+        print("OK: AUTH URL CONTAINS code_challenge")
+    else:
+        print("WARNING: AUTH URL DOES NOT CONTAIN code_challenge")
+
     print("========================================")
 
     return authorization_url
@@ -99,10 +126,15 @@ def exchange_code_and_save_token(code: str, state: str, base_url: str):
     """
     Google callback 回來後：
     1. 根據 state 從 DB 找到 user_id 與 code_verifier
-    2. 使用 code + code_verifier 向 Google 換 token
+    2. 使用 code 換 token
     3. 將 token 存進 DB
     4. 刪除已使用完的 state
     """
+
+    print("========== Google OAuth Callback ==========")
+    print("code =", code[:20] + "..." if code else "")
+    print("state =", state)
+    print("base_url =", base_url)
 
     oauth_data = get_oauth_state_data(state)
 
@@ -115,7 +147,8 @@ def exchange_code_and_save_token(code: str, state: str, base_url: str):
     client_config = get_google_client_config()
     redirect_uri = f"{base_url}/google/oauth/callback"
 
-    # 重點：同一個 code_verifier 也放在這裡
+    # 重點：
+    # 同一個 code_verifier 放回 Flow
     flow = Flow.from_client_config(
         client_config=client_config,
         scopes=GOOGLE_SCOPES,
@@ -125,7 +158,8 @@ def exchange_code_and_save_token(code: str, state: str, base_url: str):
 
     flow.redirect_uri = redirect_uri
 
-    # 重點：fetch_token 不要再手動傳 code_verifier
+    # 重點：
+    # 不要手動再塞 code_verifier 進 fetch_token()
     flow.fetch_token(code=code)
 
     creds = flow.credentials
@@ -149,7 +183,6 @@ def exchange_code_and_save_token(code: str, state: str, base_url: str):
 
     print("========== Google OAuth Callback Success ==========")
     print("user_id =", user_id)
-    print("state =", state)
     print("redirect_uri =", redirect_uri)
     print("scopes =", scopes_text)
     print("expiry =", expiry_text)
