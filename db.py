@@ -8,30 +8,12 @@
 # 4. 儲存 / 讀取摘要
 # 5. 儲存 / 讀取 Google OAuth state
 # 6. 儲存 / 讀取 Google token
+# 7. 相容舊程式使用的 get_db_connection / get_now_iso
 # ============================================================
 
 import sqlite3
-from typing import Optional, List, Dict
-
-# ============================================================
-# 相容舊程式用（很重要🔥）
-# ============================================================
-
 from datetime import datetime
-
-
-def get_db_connection():
-    """
-    舊程式相容用
-    """
-    return get_conn()
-
-
-def get_now_iso():
-    """
-    回傳現在時間（ISO 格式）
-    """
-    return datetime.utcnow().isoformat()
+from typing import Optional, List, Dict
 
 # ============================================================
 # 資料庫檔案名稱
@@ -49,6 +31,24 @@ def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# ============================================================
+# 相容舊程式用（很重要）
+# ============================================================
+def get_db_connection():
+    """
+    舊程式相容用
+    memory_service.py 仍會 import 這個名稱
+    """
+    return get_conn()
+
+
+def get_now_iso():
+    """
+    回傳目前 UTC 時間（ISO 格式）
+    """
+    return datetime.utcnow().isoformat()
 
 
 # ============================================================
@@ -103,7 +103,7 @@ def init_db():
 
     # --------------------------------------------------------
     # Google OAuth state 表
-    # 這次修正的重點：
+    # 這次修正重點：
     # 除了 state 和 user_id，還要存 code_verifier
     # --------------------------------------------------------
     cursor.execute("""
@@ -175,7 +175,6 @@ def get_recent_messages(user_id: str, limit: int = 10) -> List[Dict]:
     rows = cursor.fetchall()
     conn.close()
 
-    # 因為上面是 DESC，這裡反轉回舊 -> 新
     rows = list(reversed(rows))
 
     result = []
@@ -470,9 +469,6 @@ def get_google_token(user_id: str) -> Optional[Dict]:
     }
 
 
-# ============================================================
-# 小工具：清除指定使用者的 Google token
-# ============================================================
 def delete_google_token(user_id: str):
     """
     刪除指定使用者的 Google token
