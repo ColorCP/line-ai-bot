@@ -14,6 +14,26 @@ import sqlite3
 from typing import Optional, List, Dict
 
 # ============================================================
+# 相容舊程式用（很重要🔥）
+# ============================================================
+
+from datetime import datetime
+
+
+def get_db_connection():
+    """
+    舊程式相容用
+    """
+    return get_conn()
+
+
+def get_now_iso():
+    """
+    回傳現在時間（ISO 格式）
+    """
+    return datetime.utcnow().isoformat()
+
+# ============================================================
 # 資料庫檔案名稱
 # ============================================================
 DB_PATH = "app.db"
