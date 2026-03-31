@@ -6,7 +6,7 @@
 # 2. 儲存 / 讀取聊天訊息
 # 3. 儲存 / 讀取使用者記憶
 # 4. 儲存 / 讀取摘要
-# 5. 相容舊版 conversation_summaries / summary 欄位
+# 5. 相容舊版 conversation_summaries / summary / id 欄位
 # 6. 儲存 / 讀取 Google OAuth state
 # 7. 儲存 / 讀取 Google token
 # 8. 相容舊程式使用的函式名稱
@@ -40,7 +40,6 @@ def get_conn():
 def get_db_connection():
     """
     舊程式相容用
-    memory_service.py 可能仍會 import 這個名稱
     """
     return get_conn()
 
@@ -58,15 +57,15 @@ def get_now_iso():
 def init_db():
     """
     初始化所有需要的資料表
-    這個版本會直接重建資料表
-    適合目前開發測試階段使用
-    """
 
+    目前是開發階段，所以直接重建資料表，
+    避免 SQLite 舊欄位結構殘留造成錯誤。
+    """
     conn = get_conn()
     cursor = conn.cursor()
 
     # ========================================================
-    # ⚠️ 開發階段：直接刪除舊表，避免欄位不一致
+    # 開發階段：直接刪除舊表
     # ========================================================
     cursor.execute("DROP TABLE IF EXISTS messages")
     cursor.execute("DROP TABLE IF EXISTS memories")
@@ -102,10 +101,13 @@ def init_db():
 
     # ========================================================
     # 新版摘要表
+    # 同時保留 id / summary / summary_text
+    # 避免舊程式與新程式衝突
     # ========================================================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS summaries (
-        user_id TEXT PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL UNIQUE,
         summary TEXT,
         summary_text TEXT,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -117,7 +119,8 @@ def init_db():
     # ========================================================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS conversation_summaries (
-        user_id TEXT PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL UNIQUE,
         summary TEXT,
         summary_text TEXT,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -129,7 +132,8 @@ def init_db():
     # ========================================================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS oauth_states (
-        state TEXT PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        state TEXT NOT NULL UNIQUE,
         user_id TEXT NOT NULL,
         code_verifier TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -141,7 +145,8 @@ def init_db():
     # ========================================================
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS google_tokens (
-        user_id TEXT PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL UNIQUE,
         access_token TEXT,
         refresh_token TEXT,
         token_uri TEXT,
@@ -270,7 +275,7 @@ def get_user_memories(user_id: str, limit: int = 50) -> List[str]:
 def save_or_update_summary(user_id: str, summary_text: str):
     """
     寫入新版 summaries 表
-    同時寫入 summary 與 summary_text，避免舊程式與新程式衝突
+    同時寫入 summary 與 summary_text
     """
     conn = get_conn()
     cursor = conn.cursor()
@@ -301,6 +306,8 @@ def get_summary(user_id: str) -> str:
     SELECT summary_text, summary
     FROM summaries
     WHERE user_id = ?
+    ORDER BY id DESC
+    LIMIT 1
     """, (user_id,))
 
     row = cursor.fetchone()
@@ -349,6 +356,8 @@ def get_conversation_summary(user_id: str) -> str:
     SELECT summary_text, summary
     FROM conversation_summaries
     WHERE user_id = ?
+    ORDER BY id DESC
+    LIMIT 1
     """, (user_id,))
 
     row = cursor.fetchone()
@@ -515,6 +524,8 @@ def get_google_token(user_id: str) -> Optional[Dict]:
         updated_at
     FROM google_tokens
     WHERE user_id = ?
+    ORDER BY id DESC
+    LIMIT 1
     """, (user_id,))
 
     row = cursor.fetchone()
