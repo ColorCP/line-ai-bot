@@ -370,7 +370,6 @@ def delete_oauth_state(state: str):
     conn.commit()
     conn.close()
 
-
 # ============================================================
 # Google Token 相關
 # ============================================================
@@ -467,6 +466,14 @@ def get_google_token(user_id: str) -> Optional[Dict]:
         "expiry": row["expiry"],
         "updated_at": row["updated_at"]
     }
+
+
+def get_google_token_by_user_id(user_id: str) -> Optional[Dict]:
+    """
+    舊程式相容用
+    calendar_service.py 仍會 import 這個名稱
+    """
+    return get_google_token(user_id)
 
 
 def delete_google_token(user_id: str):
