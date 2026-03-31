@@ -8,7 +8,7 @@
 # 4. 儲存 / 讀取摘要
 # 5. 儲存 / 讀取 Google OAuth state
 # 6. 儲存 / 讀取 Google token
-# 7. 相容舊程式使用的 get_db_connection / get_now_iso
+# 7. 相容舊程式使用的函式名稱
 # ============================================================
 
 import sqlite3
@@ -34,12 +34,11 @@ def get_conn():
 
 
 # ============================================================
-# 相容舊程式用（很重要）
+# 相容舊程式用
 # ============================================================
 def get_db_connection():
     """
     舊程式相容用
-    memory_service.py 仍會 import 這個名稱
     """
     return get_conn()
 
@@ -64,7 +63,6 @@ def init_db():
 
     # --------------------------------------------------------
     # 聊天訊息表
-    # role: user / assistant
     # --------------------------------------------------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS messages (
@@ -78,7 +76,6 @@ def init_db():
 
     # --------------------------------------------------------
     # 使用者個人記憶表
-    # 例如：名字、喜好、習慣、背景資訊
     # --------------------------------------------------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS memories (
@@ -90,8 +87,7 @@ def init_db():
     """)
 
     # --------------------------------------------------------
-    # 使用者摘要表
-    # 一個 user_id 對應一筆 summary
+    # 新版摘要表
     # --------------------------------------------------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS summaries (
@@ -102,9 +98,19 @@ def init_db():
     """)
 
     # --------------------------------------------------------
+    # 舊版摘要表（相容舊程式）
+    # 這就是你現在缺的表
+    # --------------------------------------------------------
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS conversation_summaries (
+        user_id TEXT PRIMARY KEY,
+        summary_text TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # --------------------------------------------------------
     # Google OAuth state 表
-    # 這次修正重點：
-    # 除了 state 和 user_id，還要存 code_verifier
     # --------------------------------------------------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS oauth_states (
@@ -117,7 +123,6 @@ def init_db():
 
     # --------------------------------------------------------
     # Google token 表
-    # 一個 user_id 對應一組 Google token
     # --------------------------------------------------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS google_tokens (
@@ -141,9 +146,6 @@ def init_db():
 # 聊天訊息相關
 # ============================================================
 def save_message(user_id: str, role: str, content: str):
-    """
-    儲存一筆聊天訊息
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -157,10 +159,6 @@ def save_message(user_id: str, role: str, content: str):
 
 
 def get_recent_messages(user_id: str, limit: int = 10) -> List[Dict]:
-    """
-    取得最近幾筆聊天訊息
-    會依照時間由舊到新回傳，方便直接餵給 LLM
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -189,18 +187,13 @@ def get_recent_messages(user_id: str, limit: int = 10) -> List[Dict]:
 
 
 def clear_all_user_memory(user_id: str):
-    """
-    清除指定使用者的所有資料：
-    1. 聊天訊息
-    2. 記憶
-    3. 摘要
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
     cursor.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
     cursor.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
     cursor.execute("DELETE FROM summaries WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM conversation_summaries WHERE user_id = ?", (user_id,))
 
     conn.commit()
     conn.close()
@@ -210,9 +203,6 @@ def clear_all_user_memory(user_id: str):
 # 記憶相關
 # ============================================================
 def save_memory(user_id: str, memory_text: str):
-    """
-    儲存一筆記憶
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -226,9 +216,6 @@ def save_memory(user_id: str, memory_text: str):
 
 
 def get_user_memories(user_id: str, limit: int = 50) -> List[str]:
-    """
-    取得使用者的記憶列表
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -247,12 +234,9 @@ def get_user_memories(user_id: str, limit: int = 50) -> List[str]:
 
 
 # ============================================================
-# 摘要相關
+# 新版摘要相關
 # ============================================================
 def save_or_update_summary(user_id: str, summary_text: str):
-    """
-    儲存或更新使用者摘要
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -270,10 +254,6 @@ def save_or_update_summary(user_id: str, summary_text: str):
 
 
 def get_summary(user_id: str) -> str:
-    """
-    取得使用者摘要
-    若沒有資料則回傳空字串
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -293,12 +273,54 @@ def get_summary(user_id: str) -> str:
 
 
 # ============================================================
+# 舊版摘要相容函式
+# ============================================================
+def save_conversation_summary(user_id: str, summary_text: str):
+    """
+    舊程式相容用：寫入 conversation_summaries
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    INSERT INTO conversation_summaries (user_id, summary_text, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id)
+    DO UPDATE SET
+        summary_text = excluded.summary_text,
+        updated_at = CURRENT_TIMESTAMP
+    """, (user_id, summary_text))
+
+    conn.commit()
+    conn.close()
+
+
+def get_conversation_summary(user_id: str) -> str:
+    """
+    舊程式相容用：讀取 conversation_summaries
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT summary_text
+    FROM conversation_summaries
+    WHERE user_id = ?
+    """, (user_id,))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return ""
+
+    return row["summary_text"] or ""
+
+
+# ============================================================
 # 建立給 memory_service 用的整合函式
 # ============================================================
 def build_memory_context(user_id: str) -> Dict:
-    """
-    回傳整合後的記憶內容，提供給上層 service 使用
-    """
     profile_memories = get_user_memories(user_id, limit=50)
     summary_text = get_summary(user_id)
     recent_messages = get_recent_messages(user_id, limit=10)
@@ -314,9 +336,6 @@ def build_memory_context(user_id: str) -> Dict:
 # OAuth state 相關
 # ============================================================
 def save_oauth_state(state: str, user_id: str, code_verifier: str):
-    """
-    儲存 OAuth state 與 PKCE code_verifier
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -330,10 +349,6 @@ def save_oauth_state(state: str, user_id: str, code_verifier: str):
 
 
 def get_oauth_state_data(state: str) -> Optional[Dict]:
-    """
-    根據 state 查詢對應的 user_id 與 code_verifier
-    成功回傳 dict，查不到回傳 None
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -356,9 +371,6 @@ def get_oauth_state_data(state: str) -> Optional[Dict]:
 
 
 def delete_oauth_state(state: str):
-    """
-    刪除已使用完的 OAuth state
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -369,6 +381,7 @@ def delete_oauth_state(state: str):
 
     conn.commit()
     conn.close()
+
 
 # ============================================================
 # Google Token 相關
@@ -383,9 +396,6 @@ def save_google_token(
     scopes: str,
     expiry: str
 ):
-    """
-    儲存或更新 Google OAuth token
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -428,9 +438,6 @@ def save_google_token(
 
 
 def get_google_token(user_id: str) -> Optional[Dict]:
-    """
-    取得指定使用者的 Google token
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -471,15 +478,11 @@ def get_google_token(user_id: str) -> Optional[Dict]:
 def get_google_token_by_user_id(user_id: str) -> Optional[Dict]:
     """
     舊程式相容用
-    calendar_service.py 仍會 import 這個名稱
     """
     return get_google_token(user_id)
 
 
 def delete_google_token(user_id: str):
-    """
-    刪除指定使用者的 Google token
-    """
     conn = get_conn()
     cursor = conn.cursor()
 
