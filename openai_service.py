@@ -10,8 +10,9 @@
 #
 # 說明：
 # - 這份是整合版
-# - 保留 memory_service 需要的舊函式
+# - 保留 memory_service 需要的函式
 # - 同時加上 AI 上網搜尋功能
+# - 目前只支援 Google 行事曆
 # ============================================================
 
 import os
@@ -122,23 +123,26 @@ def parse_assistant_action(user_msg: str) -> dict:
 - "calendar_query"    -> 查行事曆
 - "calendar_create"   -> 新增行事曆
 
-重要規則：
-1. 問天氣、新聞、搜尋、產品比較、一般知識、旅遊、時事、聊天，一律是 general_chat
-2. 「幫我看今天行程」「我這週有哪些會議」這類，是 calendar_query
-3. 「明天下午三點安排與 Google 開會」這類，是 calendar_create
-4. 如果是 calendar_create，請盡可能解析 date/start/end/title
-5. 如果只知道開始時間但沒說結束時間，預設 end = start + 1 小時
-6. 若 calendar_create 缺少必要資訊，請設 needs_clarification = true
-7. calendar_query_type 只能是：
+非常重要的限制：
+1. 目前系統只支援 Google 行事曆
+2. 不支援 Apple 行事曆、Outlook 行事曆、iCloud 行事曆、手機內建行事曆
+3. 如果使用者說「綁定行事曆」，就是綁定 Google 行事曆，不能延伸回答到其他平台
+4. 問天氣、新聞、搜尋、產品比較、一般知識、旅遊、時事、聊天，一律是 general_chat
+5. 「幫我看今天行程」「我這週有哪些會議」「我明天下午有空嗎」這類，是 calendar_query
+6. 「明天下午三點安排與 Google 開會」這類，是 calendar_create
+7. 如果是 calendar_create，請盡可能解析 date/start/end/title
+8. 如果只知道開始時間但沒說結束時間，預設 end = start + 1 小時
+9. 若 calendar_create 缺少必要資訊，請設 needs_clarification = true
+10. calendar_query_type 只能是：
    - "today"
    - "tomorrow"
    - "this_week"
    - "next_week"
    - "recent"
    - "future"
-8. 若不是 calendar_query，calendar_query_type 請給空字串
-9. 若不是 calendar_create，date/start/end/title 請給空字串
-10. 若不需要追問，clarification_question 給空字串
+11. 若不是 calendar_query，calendar_query_type 請給空字串
+12. 若不是 calendar_create，date/start/end/title 請給空字串
+13. 若不需要追問，clarification_question 給空字串
 
 今天日期（Asia/Taipei）：
 - 今天：{today_str}
@@ -272,7 +276,8 @@ def call_ai_with_search(
 4. 若你有使用網路資料，請自然整合資訊。
 5. 不要假裝你能直接新增、刪除或修改使用者的行事曆；這些由外部程式執行。
 6. 若使用者是在延續前面一份行事曆結果做討論，你可以根據 calendar_context_text 協助分析。
-7. 回答以清楚、自然、實用為主。
+7. 目前系統只支援 Google 行事曆；不要提到 Apple、Outlook、iCloud 行事曆整合。
+8. 回答以清楚、自然、實用為主。
 """.strip()
 
     user_prompt = f"""
@@ -455,3 +460,33 @@ def chat_with_memory(
         recent_messages=recent_messages,
         calendar_context_text=calendar_context_text
     )
+
+
+# ============================================================
+# 相容舊名稱：如果舊版程式還在呼叫 parse_calendar_query
+# 就轉接到 parse_assistant_action 的結果
+# ============================================================
+def parse_calendar_query(user_msg: str) -> dict:
+    """
+    舊介面相容層
+    """
+    parsed = parse_assistant_action(user_msg)
+    query_type = parsed.get("calendar_query_type", "") or "today"
+    return {"type": query_type}
+
+
+# ============================================================
+# 相容舊名稱：如果舊版程式還在呼叫 parse_calendar_create
+# 就轉接到 parse_assistant_action 的結果
+# ============================================================
+def parse_calendar_create(user_msg: str) -> dict:
+    """
+    舊介面相容層
+    """
+    parsed = parse_assistant_action(user_msg)
+    return {
+        "date": parsed.get("date", ""),
+        "start": parsed.get("start", ""),
+        "end": parsed.get("end", ""),
+        "title": parsed.get("title", "")
+    }
