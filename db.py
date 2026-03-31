@@ -1,80 +1,116 @@
 # ============================================================
 # db.py
 # ============================================================
+# 功能：
+# 1. 初始化 SQLite 資料庫
+# 2. 儲存 / 讀取聊天訊息
+# 3. 儲存 / 讀取使用者記憶
+# 4. 儲存 / 讀取摘要
+# 5. 儲存 / 讀取 Google OAuth state
+# 6. 儲存 / 讀取 Google token
+# ============================================================
 
 import sqlite3
-from datetime import datetime
+from typing import Optional, List, Dict
+
+# ============================================================
+# 資料庫檔案名稱
+# ============================================================
+DB_PATH = "app.db"
 
 
-DB_PATH = "chat_memory.db"
-
-
-def get_db_connection():
+# ============================================================
+# 共用：取得資料庫連線
+# ============================================================
+def get_conn():
+    """
+    建立 SQLite 連線
+    """
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     return conn
 
 
-def get_now_iso():
-    return datetime.now().isoformat()
-
-
+# ============================================================
+# 初始化資料庫
+# ============================================================
 def init_db():
-    conn = get_db_connection()
+    """
+    初始化所有需要的資料表
+    如果表不存在就建立
+    """
+    conn = get_conn()
     cursor = conn.cursor()
 
+    # --------------------------------------------------------
+    # 聊天訊息表
+    # role: user / assistant
+    # --------------------------------------------------------
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
     """)
 
+    # --------------------------------------------------------
+    # 使用者個人記憶表
+    # 例如：名字、喜好、習慣、背景資訊
+    # --------------------------------------------------------
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_profiles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            memory_type TEXT NOT NULL,
-            memory_value TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
+    CREATE TABLE IF NOT EXISTS memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        memory_text TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
     """)
 
+    # --------------------------------------------------------
+    # 使用者摘要表
+    # 一個 user_id 對應一筆 summary
+    # --------------------------------------------------------
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS conversation_summaries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
+    CREATE TABLE IF NOT EXISTS summaries (
+        user_id TEXT PRIMARY KEY,
+        summary_text TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
     """)
 
+    # --------------------------------------------------------
+    # Google OAuth state 表
+    # 這次修正的重點：
+    # 除了 state 和 user_id，還要存 code_verifier
+    # --------------------------------------------------------
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS google_tokens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL UNIQUE,
-            access_token TEXT,
-            refresh_token TEXT,
-            token_uri TEXT,
-            client_id TEXT,
-            client_secret TEXT,
-            scopes TEXT,
-            expiry TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
+    CREATE TABLE IF NOT EXISTS oauth_states (
+        state TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        code_verifier TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
     """)
 
-    # OAuth state 暫存表
+    # --------------------------------------------------------
+    # Google token 表
+    # 一個 user_id 對應一組 Google token
+    # --------------------------------------------------------
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS google_oauth_states (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            state TEXT NOT NULL UNIQUE,
-            user_id TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
+    CREATE TABLE IF NOT EXISTS google_tokens (
+        user_id TEXT PRIMARY KEY,
+        access_token TEXT,
+        refresh_token TEXT,
+        token_uri TEXT,
+        client_id TEXT,
+        client_secret TEXT,
+        scopes TEXT,
+        expiry TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
     """)
 
     conn.commit()
@@ -82,7 +118,242 @@ def init_db():
 
 
 # ============================================================
-# Google token 資料操作
+# 聊天訊息相關
+# ============================================================
+def save_message(user_id: str, role: str, content: str):
+    """
+    儲存一筆聊天訊息
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    INSERT INTO messages (user_id, role, content)
+    VALUES (?, ?, ?)
+    """, (user_id, role, content))
+
+    conn.commit()
+    conn.close()
+
+
+def get_recent_messages(user_id: str, limit: int = 10) -> List[Dict]:
+    """
+    取得最近幾筆聊天訊息
+    會依照時間由舊到新回傳，方便直接餵給 LLM
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT role, content, created_at
+    FROM messages
+    WHERE user_id = ?
+    ORDER BY id DESC
+    LIMIT ?
+    """, (user_id, limit))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    # 因為上面是 DESC，這裡反轉回舊 -> 新
+    rows = list(reversed(rows))
+
+    result = []
+    for row in rows:
+        result.append({
+            "role": row["role"],
+            "content": row["content"],
+            "created_at": row["created_at"]
+        })
+
+    return result
+
+
+def clear_all_user_memory(user_id: str):
+    """
+    清除指定使用者的所有資料：
+    1. 聊天訊息
+    2. 記憶
+    3. 摘要
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM summaries WHERE user_id = ?", (user_id,))
+
+    conn.commit()
+    conn.close()
+
+
+# ============================================================
+# 記憶相關
+# ============================================================
+def save_memory(user_id: str, memory_text: str):
+    """
+    儲存一筆記憶
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    INSERT INTO memories (user_id, memory_text)
+    VALUES (?, ?)
+    """, (user_id, memory_text))
+
+    conn.commit()
+    conn.close()
+
+
+def get_user_memories(user_id: str, limit: int = 50) -> List[str]:
+    """
+    取得使用者的記憶列表
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT memory_text
+    FROM memories
+    WHERE user_id = ?
+    ORDER BY id DESC
+    LIMIT ?
+    """, (user_id, limit))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [row["memory_text"] for row in reversed(rows)]
+
+
+# ============================================================
+# 摘要相關
+# ============================================================
+def save_or_update_summary(user_id: str, summary_text: str):
+    """
+    儲存或更新使用者摘要
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    INSERT INTO summaries (user_id, summary_text, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id)
+    DO UPDATE SET
+        summary_text = excluded.summary_text,
+        updated_at = CURRENT_TIMESTAMP
+    """, (user_id, summary_text))
+
+    conn.commit()
+    conn.close()
+
+
+def get_summary(user_id: str) -> str:
+    """
+    取得使用者摘要
+    若沒有資料則回傳空字串
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT summary_text
+    FROM summaries
+    WHERE user_id = ?
+    """, (user_id,))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return ""
+
+    return row["summary_text"] or ""
+
+
+# ============================================================
+# 建立給 memory_service 用的整合函式
+# ============================================================
+def build_memory_context(user_id: str) -> Dict:
+    """
+    回傳整合後的記憶內容，提供給上層 service 使用
+    """
+    profile_memories = get_user_memories(user_id, limit=50)
+    summary_text = get_summary(user_id)
+    recent_messages = get_recent_messages(user_id, limit=10)
+
+    return {
+        "profile_text": "\n".join(profile_memories),
+        "summary_text": summary_text,
+        "recent_messages": recent_messages
+    }
+
+
+# ============================================================
+# OAuth state 相關
+# ============================================================
+def save_oauth_state(state: str, user_id: str, code_verifier: str):
+    """
+    儲存 OAuth state 與 PKCE code_verifier
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    INSERT OR REPLACE INTO oauth_states (state, user_id, code_verifier)
+    VALUES (?, ?, ?)
+    """, (state, user_id, code_verifier))
+
+    conn.commit()
+    conn.close()
+
+
+def get_oauth_state_data(state: str) -> Optional[Dict]:
+    """
+    根據 state 查詢對應的 user_id 與 code_verifier
+    成功回傳 dict，查不到回傳 None
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT user_id, code_verifier
+    FROM oauth_states
+    WHERE state = ?
+    """, (state,))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    return {
+        "user_id": row["user_id"],
+        "code_verifier": row["code_verifier"]
+    }
+
+
+def delete_oauth_state(state: str):
+    """
+    刪除已使用完的 OAuth state
+    """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    DELETE FROM oauth_states
+    WHERE state = ?
+    """, (state,))
+
+    conn.commit()
+    conn.close()
+
+
+# ============================================================
+# Google Token 相關
 # ============================================================
 def save_google_token(
     user_id: str,
@@ -94,82 +365,70 @@ def save_google_token(
     scopes: str,
     expiry: str
 ):
-    conn = get_db_connection()
+    """
+    儲存或更新 Google OAuth token
+    """
+    conn = get_conn()
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT id
-        FROM google_tokens
-        WHERE user_id = ?
-        LIMIT 1
-    """, (user_id,))
-
-    row = cursor.fetchone()
-
-    if row:
-        cursor.execute("""
-            UPDATE google_tokens
-            SET access_token = ?,
-                refresh_token = ?,
-                token_uri = ?,
-                client_id = ?,
-                client_secret = ?,
-                scopes = ?,
-                expiry = ?,
-                updated_at = ?
-            WHERE user_id = ?
-        """, (
-            access_token,
-            refresh_token,
-            token_uri,
-            client_id,
-            client_secret,
-            scopes,
-            expiry,
-            get_now_iso(),
-            user_id
-        ))
-    else:
-        cursor.execute("""
-            INSERT INTO google_tokens (
-                user_id,
-                access_token,
-                refresh_token,
-                token_uri,
-                client_id,
-                client_secret,
-                scopes,
-                expiry,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            user_id,
-            access_token,
-            refresh_token,
-            token_uri,
-            client_id,
-            client_secret,
-            scopes,
-            expiry,
-            get_now_iso(),
-            get_now_iso()
-        ))
+    INSERT INTO google_tokens (
+        user_id,
+        access_token,
+        refresh_token,
+        token_uri,
+        client_id,
+        client_secret,
+        scopes,
+        expiry,
+        updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id)
+    DO UPDATE SET
+        access_token = excluded.access_token,
+        refresh_token = excluded.refresh_token,
+        token_uri = excluded.token_uri,
+        client_id = excluded.client_id,
+        client_secret = excluded.client_secret,
+        scopes = excluded.scopes,
+        expiry = excluded.expiry,
+        updated_at = CURRENT_TIMESTAMP
+    """, (
+        user_id,
+        access_token,
+        refresh_token,
+        token_uri,
+        client_id,
+        client_secret,
+        scopes,
+        expiry
+    ))
 
     conn.commit()
     conn.close()
 
 
-def get_google_token_by_user_id(user_id: str):
-    conn = get_db_connection()
+def get_google_token(user_id: str) -> Optional[Dict]:
+    """
+    取得指定使用者的 Google token
+    """
+    conn = get_conn()
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT access_token, refresh_token, token_uri, client_id, client_secret, scopes, expiry
-        FROM google_tokens
-        WHERE user_id = ?
-        LIMIT 1
+    SELECT
+        user_id,
+        access_token,
+        refresh_token,
+        token_uri,
+        client_id,
+        client_secret,
+        scopes,
+        expiry,
+        updated_at
+    FROM google_tokens
+    WHERE user_id = ?
     """, (user_id,))
 
     row = cursor.fetchone()
@@ -179,73 +438,32 @@ def get_google_token_by_user_id(user_id: str):
         return None
 
     return {
-        "access_token": row[0],
-        "refresh_token": row[1],
-        "token_uri": row[2],
-        "client_id": row[3],
-        "client_secret": row[4],
-        "scopes": row[5],
-        "expiry": row[6]
+        "user_id": row["user_id"],
+        "access_token": row["access_token"],
+        "refresh_token": row["refresh_token"],
+        "token_uri": row["token_uri"],
+        "client_id": row["client_id"],
+        "client_secret": row["client_secret"],
+        "scopes": row["scopes"],
+        "expiry": row["expiry"],
+        "updated_at": row["updated_at"]
     }
 
 
+# ============================================================
+# 小工具：清除指定使用者的 Google token
+# ============================================================
 def delete_google_token(user_id: str):
-    conn = get_db_connection()
+    """
+    刪除指定使用者的 Google token
+    """
+    conn = get_conn()
     cursor = conn.cursor()
 
     cursor.execute("""
-        DELETE FROM google_tokens
-        WHERE user_id = ?
+    DELETE FROM google_tokens
+    WHERE user_id = ?
     """, (user_id,))
-
-    conn.commit()
-    conn.close()
-
-
-# ============================================================
-# OAuth state 暫存
-# ============================================================
-def save_oauth_state(state: str, user_id: str):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        INSERT INTO google_oauth_states (state, user_id, created_at)
-        VALUES (?, ?, ?)
-    """, (state, user_id, get_now_iso()))
-
-    conn.commit()
-    conn.close()
-
-
-def get_user_id_by_oauth_state(state: str):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT user_id
-        FROM google_oauth_states
-        WHERE state = ?
-        LIMIT 1
-    """, (state,))
-
-    row = cursor.fetchone()
-    conn.close()
-
-    if not row:
-        return None
-
-    return row[0]
-
-
-def delete_oauth_state(state: str):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        DELETE FROM google_oauth_states
-        WHERE state = ?
-    """, (state,))
 
     conn.commit()
     conn.close()
