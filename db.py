@@ -3,26 +3,31 @@
 # ============================================================
 # 功能：
 # 1. 初始化 SQLite 資料庫
-# 2. 儲存 / 讀取聊天訊息
-# 3. 儲存 / 讀取使用者記憶
-# 4. 儲存 / 讀取摘要
-# 5. 相容舊版 conversation_summaries / user_profiles / summary / id 欄位
-# 6. 儲存 / 讀取 Google OAuth state
-# 7. 儲存 / 讀取 Google token
-# 8. 相容舊程式使用的函式名稱
+# 2. 提供 memory_service.py 使用的 messages / user_profiles / conversation_summaries
+# 3. 提供 google_oauth_service.py 使用的 oauth_states
+# 4. 提供 calendar_service.py 使用的 google_tokens
+# 5. 保留舊函式名稱相容
+#
+# 注意：
+# 目前是修復 / 測試階段
+# init_db() 會直接 DROP TABLE 再重建
+# 所以每次啟動都會清空資料
 # ============================================================
 
 import sqlite3
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, Dict
 
 DB_PATH = "app.db"
 
 
 # ============================================================
-# 共用：取得資料庫連線
+# 共用：取得 SQLite 連線
 # ============================================================
 def get_conn():
+    """
+    建立 SQLite 連線
+    """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -32,32 +37,49 @@ def get_conn():
 # 相容舊程式用
 # ============================================================
 def get_db_connection():
+    """
+    舊程式相容用
+    memory_service.py 會 import 這個名稱
+    """
     return get_conn()
 
 
 def get_now_iso():
+    """
+    回傳目前 UTC 時間（ISO 格式）
+    """
     return datetime.utcnow().isoformat()
 
 
 # ============================================================
 # 初始化資料庫
-# 開發階段直接重建，避免舊 SQLite 結構干擾
 # ============================================================
 def init_db():
+    """
+    初始化所有需要的資料表
+
+    目前為了避免舊表結構殘留，
+    啟動時會直接刪除舊表再重建。
+    """
     conn = get_conn()
     cursor = conn.cursor()
 
-    # 開發階段：直接刪除舊表
+    # --------------------------------------------------------
+    # 開發 / 修復階段：直接重建表
+    # --------------------------------------------------------
     cursor.execute("DROP TABLE IF EXISTS messages")
-    cursor.execute("DROP TABLE IF EXISTS memories")
-    cursor.execute("DROP TABLE IF EXISTS summaries")
-    cursor.execute("DROP TABLE IF EXISTS conversation_summaries")
     cursor.execute("DROP TABLE IF EXISTS user_profiles")
+    cursor.execute("DROP TABLE IF EXISTS conversation_summaries")
     cursor.execute("DROP TABLE IF EXISTS oauth_states")
     cursor.execute("DROP TABLE IF EXISTS google_tokens")
 
+    # 如果以前你有其他版本的表，也一起清掉，避免干擾
+    cursor.execute("DROP TABLE IF EXISTS memories")
+    cursor.execute("DROP TABLE IF EXISTS summaries")
+
     # --------------------------------------------------------
-    # 聊天訊息表
+    # 短期記憶：messages
+    # 給 memory_service.py 使用
     # --------------------------------------------------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS messages (
@@ -65,63 +87,44 @@ def init_db():
         user_id TEXT NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TEXT NOT NULL
     )
     """)
 
     # --------------------------------------------------------
-    # 使用者記憶表
-    # --------------------------------------------------------
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS memories (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT NOT NULL,
-        memory_text TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    # --------------------------------------------------------
-    # 新版摘要表
-    # --------------------------------------------------------
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS summaries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT NOT NULL UNIQUE,
-        summary TEXT,
-        summary_text TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    # --------------------------------------------------------
-    # 舊版摘要表（相容舊程式）
-    # --------------------------------------------------------
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS conversation_summaries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT NOT NULL UNIQUE,
-        summary TEXT,
-        summary_text TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    # --------------------------------------------------------
-    # 使用者 Profile 表（相容舊程式）
-    # 很多舊邏輯會直接讀這張表
+    # 長期記憶：user_profiles
+    # 給 memory_service.py 使用
+    # 欄位要完全符合你目前的 memory_service.py：
+    # id / user_id / memory_type / memory_value / updated_at
     # --------------------------------------------------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS user_profiles (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT NOT NULL UNIQUE,
-        profile_text TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        user_id TEXT NOT NULL,
+        memory_type TEXT NOT NULL,
+        memory_value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
     )
     """)
 
     # --------------------------------------------------------
-    # OAuth state 表
+    # 摘要記憶：conversation_summaries
+    # 給 memory_service.py 使用
+    # 欄位要完全符合你目前的 memory_service.py：
+    # id / user_id / summary / created_at
+    # --------------------------------------------------------
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS conversation_summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """)
+
+    # --------------------------------------------------------
+    # OAuth state
+    # 給 google_oauth_service.py 使用
     # --------------------------------------------------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS oauth_states (
@@ -129,12 +132,13 @@ def init_db():
         state TEXT NOT NULL UNIQUE,
         user_id TEXT NOT NULL,
         code_verifier TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TEXT NOT NULL
     )
     """)
 
     # --------------------------------------------------------
-    # Google token 表
+    # Google Token
+    # 給 calendar_service.py / google_oauth_service.py 使用
     # --------------------------------------------------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS google_tokens (
@@ -147,7 +151,7 @@ def init_db():
         client_secret TEXT,
         scopes TEXT,
         expiry TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at TEXT NOT NULL
     )
     """)
 
@@ -156,263 +160,36 @@ def init_db():
 
 
 # ============================================================
-# 聊天訊息相關
-# ============================================================
-def save_message(user_id: str, role: str, content: str):
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    INSERT INTO messages (user_id, role, content)
-    VALUES (?, ?, ?)
-    """, (user_id, role, content))
-
-    conn.commit()
-    conn.close()
-
-
-def get_recent_messages(user_id: str, limit: int = 10) -> List[Dict]:
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    SELECT role, content, created_at
-    FROM messages
-    WHERE user_id = ?
-    ORDER BY id DESC
-    LIMIT ?
-    """, (user_id, limit))
-
-    rows = cursor.fetchall()
-    conn.close()
-
-    rows = list(reversed(rows))
-
-    result = []
-    for row in rows:
-        result.append({
-            "role": row["role"],
-            "content": row["content"],
-            "created_at": row["created_at"]
-        })
-
-    return result
-
-
-def clear_all_user_memory(user_id: str):
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
-    cursor.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
-    cursor.execute("DELETE FROM summaries WHERE user_id = ?", (user_id,))
-    cursor.execute("DELETE FROM conversation_summaries WHERE user_id = ?", (user_id,))
-    cursor.execute("DELETE FROM user_profiles WHERE user_id = ?", (user_id,))
-
-    conn.commit()
-    conn.close()
-
-
-# ============================================================
-# 記憶相關
-# ============================================================
-def save_memory(user_id: str, memory_text: str):
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    INSERT INTO memories (user_id, memory_text)
-    VALUES (?, ?)
-    """, (user_id, memory_text))
-
-    conn.commit()
-    conn.close()
-
-
-def get_user_memories(user_id: str, limit: int = 50) -> List[str]:
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    SELECT memory_text
-    FROM memories
-    WHERE user_id = ?
-    ORDER BY id DESC
-    LIMIT ?
-    """, (user_id, limit))
-
-    rows = cursor.fetchall()
-    conn.close()
-
-    return [row["memory_text"] for row in reversed(rows)]
-
-
-# ============================================================
-# 使用者 Profile（相容舊程式）
-# ============================================================
-def save_user_profile(user_id: str, profile_text: str):
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    INSERT INTO user_profiles (user_id, profile_text, updated_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(user_id)
-    DO UPDATE SET
-        profile_text = excluded.profile_text,
-        updated_at = CURRENT_TIMESTAMP
-    """, (user_id, profile_text))
-
-    conn.commit()
-    conn.close()
-
-
-def get_user_profile(user_id: str) -> str:
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    SELECT profile_text
-    FROM user_profiles
-    WHERE user_id = ?
-    ORDER BY id DESC
-    LIMIT 1
-    """, (user_id,))
-
-    row = cursor.fetchone()
-    conn.close()
-
-    if not row:
-        return ""
-
-    return row["profile_text"] or ""
-
-
-# ============================================================
-# 摘要相關（新版）
-# ============================================================
-def save_or_update_summary(user_id: str, summary_text: str):
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    INSERT INTO summaries (user_id, summary, summary_text, updated_at)
-    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(user_id)
-    DO UPDATE SET
-        summary = excluded.summary,
-        summary_text = excluded.summary_text,
-        updated_at = CURRENT_TIMESTAMP
-    """, (user_id, summary_text, summary_text))
-
-    conn.commit()
-    conn.close()
-
-
-def get_summary(user_id: str) -> str:
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    SELECT summary_text, summary
-    FROM summaries
-    WHERE user_id = ?
-    ORDER BY id DESC
-    LIMIT 1
-    """, (user_id,))
-
-    row = cursor.fetchone()
-    conn.close()
-
-    if not row:
-        return ""
-
-    return row["summary_text"] or row["summary"] or ""
-
-
-# ============================================================
-# 摘要相關（舊版相容）
-# ============================================================
-def save_conversation_summary(user_id: str, summary_text: str):
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    INSERT INTO conversation_summaries (user_id, summary, summary_text, updated_at)
-    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(user_id)
-    DO UPDATE SET
-        summary = excluded.summary,
-        summary_text = excluded.summary_text,
-        updated_at = CURRENT_TIMESTAMP
-    """, (user_id, summary_text, summary_text))
-
-    conn.commit()
-    conn.close()
-
-
-def get_conversation_summary(user_id: str) -> str:
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    SELECT summary_text, summary
-    FROM conversation_summaries
-    WHERE user_id = ?
-    ORDER BY id DESC
-    LIMIT 1
-    """, (user_id,))
-
-    row = cursor.fetchone()
-    conn.close()
-
-    if not row:
-        return ""
-
-    return row["summary_text"] or row["summary"] or ""
-
-
-# ============================================================
-# 建立給 memory_service 用的整合函式
-# ============================================================
-def build_memory_context(user_id: str) -> Dict:
-    profile_text = get_user_profile(user_id)
-    profile_memories = get_user_memories(user_id, limit=50)
-
-    # 如果 user_profiles 沒資料，就退回 memories 組合
-    if not profile_text:
-        profile_text = "\n".join(profile_memories)
-
-    summary_text = get_summary(user_id)
-    if not summary_text:
-        summary_text = get_conversation_summary(user_id)
-
-    recent_messages = get_recent_messages(user_id, limit=10)
-
-    return {
-        "profile_text": profile_text,
-        "summary_text": summary_text,
-        "recent_messages": recent_messages
-    }
-
-
-# ============================================================
-# OAuth state 相關
+# Google OAuth state 相關
+# 給 google_oauth_service.py 用
 # ============================================================
 def save_oauth_state(state: str, user_id: str, code_verifier: str):
+    """
+    儲存 OAuth state 與 PKCE code_verifier
+    """
     conn = get_conn()
     cursor = conn.cursor()
 
     cursor.execute("""
-    INSERT OR REPLACE INTO oauth_states (state, user_id, code_verifier)
-    VALUES (?, ?, ?)
-    """, (state, user_id, code_verifier))
+    INSERT OR REPLACE INTO oauth_states (
+        state, user_id, code_verifier, created_at
+    )
+    VALUES (?, ?, ?, ?)
+    """, (
+        state,
+        user_id,
+        code_verifier,
+        get_now_iso()
+    ))
 
     conn.commit()
     conn.close()
 
 
 def get_oauth_state_data(state: str) -> Optional[Dict]:
+    """
+    根據 state 查詢 user_id 與 code_verifier
+    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -420,6 +197,8 @@ def get_oauth_state_data(state: str) -> Optional[Dict]:
     SELECT user_id, code_verifier
     FROM oauth_states
     WHERE state = ?
+    ORDER BY id DESC
+    LIMIT 1
     """, (state,))
 
     row = cursor.fetchone()
@@ -435,6 +214,9 @@ def get_oauth_state_data(state: str) -> Optional[Dict]:
 
 
 def delete_oauth_state(state: str):
+    """
+    刪除已使用過的 OAuth state
+    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -449,6 +231,7 @@ def delete_oauth_state(state: str):
 
 # ============================================================
 # Google Token 相關
+# 給 calendar_service.py / google_oauth_service.py 用
 # ============================================================
 def save_google_token(
     user_id: str,
@@ -460,6 +243,9 @@ def save_google_token(
     scopes: str,
     expiry: str
 ):
+    """
+    儲存或更新 Google OAuth token
+    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -475,7 +261,7 @@ def save_google_token(
         expiry,
         updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id)
     DO UPDATE SET
         access_token = excluded.access_token,
@@ -485,7 +271,7 @@ def save_google_token(
         client_secret = excluded.client_secret,
         scopes = excluded.scopes,
         expiry = excluded.expiry,
-        updated_at = CURRENT_TIMESTAMP
+        updated_at = excluded.updated_at
     """, (
         user_id,
         access_token,
@@ -494,14 +280,18 @@ def save_google_token(
         client_id,
         client_secret,
         scopes,
-        expiry
+        expiry,
+        get_now_iso()
     ))
 
     conn.commit()
     conn.close()
 
 
-def get_google_token(user_id: str) -> Optional[Dict]:
+def get_google_token_by_user_id(user_id: str) -> Optional[Dict]:
+    """
+    給 calendar_service.py 使用
+    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -541,11 +331,17 @@ def get_google_token(user_id: str) -> Optional[Dict]:
     }
 
 
-def get_google_token_by_user_id(user_id: str) -> Optional[Dict]:
-    return get_google_token(user_id)
+def get_google_token(user_id: str) -> Optional[Dict]:
+    """
+    相容另一種命名
+    """
+    return get_google_token_by_user_id(user_id)
 
 
 def delete_google_token(user_id: str):
+    """
+    刪除指定使用者的 Google token
+    """
     conn = get_conn()
     cursor = conn.cursor()
 
