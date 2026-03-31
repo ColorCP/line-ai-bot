@@ -1,6 +1,15 @@
-credentials.json
-token.json
-chat_memory.db
-.env
+# Python
 __pycache__/
 *.pyc
+
+# Local secrets
+credentials.json
+token.json
+.env
+
+# Local database
+chat_memory.db
+
+# OS files
+.DS_Store
+Thumbs.db
