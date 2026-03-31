@@ -3,15 +3,15 @@
 # ============================================================
 # 功能：
 # 1. AI 單一入口判斷使用者要做什麼
-# 2. 若是一般問答 / 搜尋 / 天氣 / 新聞 / 比較 / 查資料
-#    -> 走 Responses API + web search
-# 3. 若是行事曆功能
-#    -> 解析成結構化資料，再交給 main.py 呼叫 calendar_service
+# 2. 一般搜尋 / 問答 -> Responses API + web search
+# 3. 行事曆查詢 / 建立 -> 解析成結構化資料
+# 4. 記憶抽取 -> 提供給 memory_service.py 使用
+# 5. 記憶摘要 -> 提供給 memory_service.py 使用
 #
-# 設計理念：
-# - AI 負責判斷與理解自然語言
-# - 你的程式負責真的執行 Google Calendar API
-# - 這樣最像真正的 AI 秘書
+# 說明：
+# - 這份是整合版
+# - 保留 memory_service 需要的舊函式
+# - 同時加上 AI 上網搜尋功能
 # ============================================================
 
 import os
@@ -28,7 +28,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # 一般搜尋 / 問答模型
-OPENAI_GENERAL_MODEL = os.getenv("OPENAI_GENERAL_MODEL", "gpt-5")
+OPENAI_GENERAL_MODEL = os.getenv("OPENAI_GENERAL_MODEL", "gpt-4.1")
 
 # 結構化解析模型
 OPENAI_PARSE_MODEL = os.getenv("OPENAI_PARSE_MODEL", "gpt-4.1-mini")
@@ -37,10 +37,10 @@ OPENAI_PARSE_MODEL = os.getenv("OPENAI_PARSE_MODEL", "gpt-4.1-mini")
 # ============================================================
 # 工具函式：安全解析 JSON
 # ============================================================
-def safe_json_loads(text: str, fallback: dict) -> dict:
+def safe_json_loads(text: str, fallback):
     """
     安全解析 JSON
-    若失敗，回傳 fallback
+    若失敗就回傳 fallback
     """
     try:
         return json.loads(text)
@@ -103,20 +103,14 @@ def parse_assistant_action(user_msg: str) -> dict:
       "needs_clarification": false,
       "clarification_question": ""
     }
-
-    設計重點：
-    1. AI 先決定這句是一般聊天、綁定、清除記憶、查行事曆、還是新增行事曆
-    2. 若是行事曆，就同時把所需欄位解析出來
-    3. 若資訊不足，可要求補充
     """
-
     now = get_now_taipei()
     today_str = now.strftime("%Y-%m-%d")
     tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     day_after_tomorrow_str = (now + timedelta(days=2)).strftime("%Y-%m-%d")
 
-    system_prompt = """
-你是 AI 秘書的「動作判斷器」。
+    system_prompt = f"""
+你是 AI 秘書的動作判斷器。
 你只能輸出 JSON，不能輸出其他文字。
 
 你要判斷使用者這句話想做什麼，並盡可能解析參數。
@@ -147,9 +141,9 @@ def parse_assistant_action(user_msg: str) -> dict:
 10. 若不需要追問，clarification_question 給空字串
 
 今天日期（Asia/Taipei）：
-- 今天：""" + today_str + """
-- 明天：""" + tomorrow_str + """
-- 後天：""" + day_after_tomorrow_str + """
+- 今天：{today_str}
+- 明天：{tomorrow_str}
+- 後天：{day_after_tomorrow_str}
 """.strip()
 
     user_prompt = f"""
@@ -248,7 +242,7 @@ def parse_assistant_action(user_msg: str) -> dict:
 
 
 # ============================================================
-# 一般聊天 / 搜尋 / 問答
+# 一般聊天 / 搜尋 / 問答（含 AI 上網搜尋）
 # ============================================================
 def call_ai_with_search(
     user_msg: str,
@@ -263,9 +257,8 @@ def call_ai_with_search(
     說明：
     - 使用 Responses API
     - 開啟 web search
-    - 所有一般問答、天氣、新聞、查資料、旅遊、比較等都從這裡走
+    - 一般問答、搜尋、天氣、新聞、比較、旅遊等都從這裡走
     """
-
     recent_text = format_recent_messages(recent_messages)
 
     system_prompt = """
@@ -276,7 +269,7 @@ def call_ai_with_search(
 1. 若問題需要最新資訊、即時資訊、天氣、新聞、價格、旅遊、地點、推薦、規格比較、法規更新等，請優先使用 web search。
 2. 若不需要上網即可回答，則直接回答即可。
 3. 回答要自然，不要像搜尋引擎拼貼。
-4. 若你有使用網路資料，請在回答中自然整合資訊。
+4. 若你有使用網路資料，請自然整合資訊。
 5. 不要假裝你能直接新增、刪除或修改使用者的行事曆；這些由外部程式執行。
 6. 若使用者是在延續前面一份行事曆結果做討論，你可以根據 calendar_context_text 協助分析。
 7. 回答以清楚、自然、實用為主。
@@ -307,9 +300,8 @@ def call_ai_with_search(
             instructions=system_prompt,
             input=user_prompt,
             tools=[
-                {"type": "web_search"}
-            ],
-            tool_choice="auto"
+                {"type": "web_search_preview"}
+            ]
         )
 
         answer = (response.output_text or "").strip()
@@ -322,3 +314,144 @@ def call_ai_with_search(
     except Exception as e:
         print("call_ai_with_search error =", str(e))
         return f"AI 呼叫失敗：{str(e)}"
+
+
+# ============================================================
+# 記憶抽取：提供給 memory_service.py 使用
+# ============================================================
+def extract_profile_memories_from_text(user_text: str):
+    """
+    從使用者輸入中抽取適合長期保存的個人資訊
+
+    回傳 list[str]
+    例如：
+    [
+        "使用者喜歡 Lexus IS",
+        "使用者有一隻貓叫咪咪"
+    ]
+    """
+    system_prompt = """
+你是記憶抽取器。
+請從使用者輸入中，抽取適合長期保存的個人資訊。
+
+只保留：
+1. 長期穩定偏好
+2. 身分背景
+3. 長期計畫
+4. 家庭成員 / 寵物名稱
+5. 之後回答很可能有幫助的資訊
+
+不要保留：
+1. 短期情緒
+2. 一次性的隨口聊天
+3. 當下天氣、短期新聞、即時事件
+4. 太瑣碎、沒有長期價值的內容
+
+請只輸出 JSON 陣列，例如：
+["使用者喜歡 Lexus IS", "使用者有一隻貓叫咪咪"]
+
+如果沒有值得記住的內容，輸出：
+[]
+""".strip()
+
+    fallback = []
+
+    try:
+        response = client.responses.create(
+            model=OPENAI_PARSE_MODEL,
+            instructions=system_prompt,
+            input=user_text
+        )
+
+        raw_text = (response.output_text or "").strip()
+        print("extract_profile_memories_from_text raw =", raw_text)
+
+        data = safe_json_loads(raw_text, fallback)
+
+        if isinstance(data, list):
+            clean_items = []
+            for item in data:
+                text = str(item).strip()
+                if text:
+                    clean_items.append(text)
+            return clean_items
+
+        return fallback
+
+    except Exception as e:
+        print("extract_profile_memories_from_text error =", str(e))
+        return fallback
+
+
+# ============================================================
+# 記憶摘要：提供給 memory_service.py 使用
+# ============================================================
+def summarize_messages_for_memory(messages) -> str:
+    """
+    將一批對話訊息摘要成較短的記憶摘要
+    messages 格式預期為 list[dict]
+    """
+    if not messages:
+        return ""
+
+    lines = []
+
+    for item in messages:
+        role = item.get("role", "")
+        content = item.get("content", "")
+
+        if role == "user":
+            lines.append(f"使用者：{content}")
+        else:
+            lines.append(f"助理：{content}")
+
+    conversation_text = "\n".join(lines)
+
+    system_prompt = """
+你是對話摘要器。
+請把以下對話整理成短摘要，供 AI 助理未來參考。
+
+要求：
+1. 使用繁體中文
+2. 保留重要背景、需求、長期計畫、持續中的問題
+3. 刪除瑣碎寒暄
+4. 控制在精簡但有用的長度
+""".strip()
+
+    try:
+        response = client.responses.create(
+            model=OPENAI_PARSE_MODEL,
+            instructions=system_prompt,
+            input=conversation_text
+        )
+
+        summary = (response.output_text or "").strip()
+        print("summarize_messages_for_memory raw =", summary)
+        return summary
+
+    except Exception as e:
+        print("summarize_messages_for_memory error =", str(e))
+        return ""
+
+
+# ============================================================
+# 相容舊名稱：如果其他地方還在呼叫 chat_with_memory
+# 就轉接到新的 call_ai_with_search
+# ============================================================
+def chat_with_memory(
+    user_msg: str,
+    profile_text: str = "",
+    summary_text: str = "",
+    recent_messages=None,
+    calendar_context_text: str = ""
+) -> str:
+    """
+    舊介面相容層
+    """
+    return call_ai_with_search(
+        user_msg=user_msg,
+        profile_text=profile_text,
+        summary_text=summary_text,
+        recent_messages=recent_messages,
+        calendar_context_text=calendar_context_text
+    )
