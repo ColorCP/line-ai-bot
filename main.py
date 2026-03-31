@@ -1,7 +1,7 @@
 # ============================================================
 # main.py
 # ============================================================
-# 第 4 階段（AI 秘書版本）
+# 第 5 階段（AI 秘書 + 天氣查詢版本）
 #
 # 功能：
 # 1. LINE webhook 接收訊息
@@ -13,12 +13,22 @@
 # 7. 支援查詢今天 / 明天 / 本週 / 下週 / 近期 / 未來行程
 # 8. 新增行程後，回覆完整時間與主題
 # 9. 查完行程後，下一句可延續分析該份行程
+# 10. 支援世界天氣查詢（不經過 OpenAI，節省 token）
 # ============================================================
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 import requests
 import os
+
+# ============================================================
+# 天氣服務模組
+# 說明：
+# 1. is_weather_query() 用來判斷使用者這句是不是查天氣
+# 2. get_weather_reply() 用來直接查天氣並回傳文字
+# 3. 這段不走 OpenAI，因此不消耗 OpenAI token
+# ============================================================
+from weather_service import is_weather_query, get_weather_reply
 
 # ============================================================
 # 自己的模組：資料庫初始化
@@ -112,7 +122,7 @@ def reply(reply_token: str, text: str):
         "messages": [
             {
                 "type": "text",
-                "text": text[:5000]
+                "text": text[:5000]   # 避免超過 LINE 的文字長度限制
             }
         ]
     }
@@ -134,7 +144,7 @@ def reply(reply_token: str, text: str):
 @app.get("/")
 def root():
     """
-    確認服務正常啟動
+    確認服務是否正常啟動
     """
     return {"status": "ok"}
 
@@ -178,7 +188,7 @@ def google_oauth_start(user_id: str):
 @app.get("/google/oauth/callback")
 def google_oauth_callback(code: str, state: str):
     """
-    Google 登入授權完成後打回這裡
+    Google 登入授權完成後，Google 會打回這個 callback
     """
     if not APP_BASE_URL:
         return HTMLResponse(
@@ -203,6 +213,7 @@ def google_oauth_callback(code: str, state: str):
                     <li>幫我看今天行程</li>
                     <li>我這週有哪些會議</li>
                     <li>後天新增一個會議，與 Google 開會 下午一點</li>
+                    <li>東京今天天氣</li>
                 </ul>
             </body>
         </html>
@@ -235,16 +246,22 @@ async def webhook(request: Request):
 
     for event in events:
 
+        # ----------------------------------------------------
         # 只處理 message 類型事件
+        # ----------------------------------------------------
         if event.get("type") != "message":
             continue
 
+        # ----------------------------------------------------
         # 只處理文字訊息
+        # ----------------------------------------------------
         message = event.get("message", {})
         if message.get("type") != "text":
             continue
 
+        # ----------------------------------------------------
         # 取出使用者資料
+        # ----------------------------------------------------
         user_id = event["source"].get("userId")
         user_msg = message.get("text", "").strip()
         reply_token = event.get("replyToken")
@@ -262,6 +279,13 @@ async def webhook(request: Request):
 
 【🧠 一般聊天】
 - 問問題、聊天、整理資訊
+
+【🌤 天氣功能】
+- 台北天氣
+- 東京今天天氣
+- 紐約會下雨嗎
+- London weather
+- Paris temperature
 
 【📅 行事曆功能】
 👉 請先輸入：綁定行事曆
@@ -283,14 +307,32 @@ async def webhook(request: Request):
             )
             continue
 
+        # ----------------------------------------------------
         # 如果取不到 user_id，就無法做多使用者邏輯
+        # ----------------------------------------------------
         if not user_id:
             reply(reply_token, "無法取得使用者資訊")
             continue
 
         try:
             # =================================================
+            # 0. 先處理天氣查詢
+            # 說明：
+            # 天氣查詢直接走 weather_service.py
+            # 不經過 OpenAI，因此不花 OpenAI token
+            # =================================================
+            if is_weather_query(user_msg):
+                print("detected weather query")
+
+                weather_reply = get_weather_reply(user_msg)
+                reply(reply_token, weather_reply)
+                continue
+
+            # =================================================
             # 1. 判斷使用者意圖
+            # 說明：
+            # 這裡是你原本的 AI/規則意圖判斷
+            # 像是記憶、綁定行事曆、查行程、建立行程等
             # =================================================
             intent = detect_user_intent(user_msg)
             print("detected intent =", intent)
@@ -333,7 +375,8 @@ async def webhook(request: Request):
                     query_type=parsed_query.get("type", "unknown")
                 )
 
-                # 儲存最近一次行事曆查詢結果，供下一輪分析用
+                # 儲存最近一次行事曆查詢結果
+                # 讓下一輪可以延續分析剛剛查到的行程內容
                 save_calendar_context(
                     user_id=user_id,
                     query_type=query_payload["query_type"],
@@ -352,6 +395,8 @@ async def webhook(request: Request):
                 parsed = parse_calendar_create(user_msg)
                 print("parsed_calendar_create =", parsed)
 
+                # 若 AI 還無法完整解析出日期 / 開始 / 結束 / 主題
+                # 就請使用者再描述清楚一點
                 if not all([
                     parsed["date"],
                     parsed["start"],
@@ -380,21 +425,33 @@ async def webhook(request: Request):
             # 6. 一般聊天（含記憶 + 行事曆短期上下文）
             # =================================================
 
-            # 先抽取長期記憶
+            # -------------------------------------------------
+            # 6-1. 自動抽取使用者的長期記憶
+            # -------------------------------------------------
             auto_extract_and_save_profile_memories(user_id, user_msg)
 
-            # 必要時做摘要記憶
+            # -------------------------------------------------
+            # 6-2. 必要時做摘要記憶
+            # -------------------------------------------------
             summarize_if_needed(user_id)
 
-            # 建立記憶上下文
+            # -------------------------------------------------
+            # 6-3. 建立記憶上下文
+            # -------------------------------------------------
             memory_context = build_memory_context(user_id)
 
-            # 若這句話像在延續討論剛剛那份行程，就把最近行事曆結果丟給 AI
+            # -------------------------------------------------
+            # 6-4. 如果這句像是在延續討論剛剛的行程結果，
+            # 就把最近一次行事曆內容一起送給 AI
+            # -------------------------------------------------
             calendar_context_text = ""
             if should_use_calendar_context(user_msg):
                 calendar_context_text = build_calendar_context_text(user_id=user_id)
                 print("calendar_context_text =", calendar_context_text)
 
+            # -------------------------------------------------
+            # 6-5. 呼叫 OpenAI 對話
+            # -------------------------------------------------
             ai_reply = chat_with_memory(
                 user_msg=user_msg,
                 profile_text=memory_context["profile_text"],
@@ -403,11 +460,15 @@ async def webhook(request: Request):
                 calendar_context_text=calendar_context_text
             )
 
-            # 存入對話記錄
+            # -------------------------------------------------
+            # 6-6. 存入對話記錄
+            # -------------------------------------------------
             save_message(user_id, "user", user_msg)
             save_message(user_id, "assistant", ai_reply)
 
-            # 回覆使用者
+            # -------------------------------------------------
+            # 6-7. 回覆使用者
+            # -------------------------------------------------
             reply(reply_token, ai_reply)
 
         except Exception as e:
