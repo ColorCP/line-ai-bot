@@ -373,3 +373,63 @@ def create_calendar_event(
         "message": message,
         "event": created_event
     }
+
+# ============================================================
+# 刪除 Google 行事曆事件（用 event_id 刪除）
+# ============================================================
+def delete_calendar_event_by_id(user_id: str, event_id: str):
+    """
+    依照 event_id 刪除 Google 行事曆事件
+
+    參數：
+    - user_id: LINE 使用者 ID
+    - event_id: Google Calendar event id
+
+    回傳格式：
+    {
+        "ok": True / False,
+        "message": "給前端或 LINE 顯示的訊息"
+    }
+    """
+
+    try:
+        # ----------------------------------------------------
+        # 1. 先取得這位使用者的 Google 憑證
+        #    這裡沿用你原本查詢 / 建立行事曆時的憑證取得方式
+        # ----------------------------------------------------
+        creds = get_google_credentials_by_user(user_id)
+
+        if not creds:
+            return {
+                "ok": False,
+                "message": "你還沒有綁定 Google 行事曆。"
+            }
+
+        # ----------------------------------------------------
+        # 2. 建立 Google Calendar API 服務物件
+        # ----------------------------------------------------
+        service = build("calendar", "v3", credentials=creds)
+
+        # ----------------------------------------------------
+        # 3. 執行刪除
+        #    calendarId='primary' 代表使用者主要行事曆
+        # ----------------------------------------------------
+        service.events().delete(
+            calendarId="primary",
+            eventId=event_id
+        ).execute()
+
+        # ----------------------------------------------------
+        # 4. 回傳成功結果
+        # ----------------------------------------------------
+        return {
+            "ok": True,
+            "message": "行程已成功刪除。"
+        }
+
+    except Exception as e:
+        print("delete_calendar_event_by_id error =", str(e))
+        return {
+            "ok": False,
+            "message": f"刪除行程失敗：{str(e)}"
+        }
