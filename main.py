@@ -536,7 +536,7 @@ async def webhook(request: Request):
                     end_date = (parsed_action.get("end_date", "") or "").strip()
 
                     if not all([start_date, end_date, title]):
-                        reply(reply_token, "我可以幫你新增多天行程，但我還無法完整解析內容。")
+                        reply(reply_token, "我可以幫你新增多天行程，請給我日期、事件、時間, ex: 新增行程3/1 下午六點與朋友在101聚餐。刪除行程時請輸入: 刪除3/1與朋友在101聚餐")
                         continue
 
                     result = create_calendar_event(
