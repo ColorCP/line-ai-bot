@@ -10,9 +10,15 @@
 # 注意：
 # 所有記憶都會依照 LINE 的 user_id 分開儲存，
 # 所以未來多人使用時，不會互相混到記憶。
+#
+# 這一版修正重點：
+# 1. 相容 openai_service.py 的記憶抽取格式（list[str]）
+# 2. 修正 string indices must be integers, not 'str'
+# 3. 加入必要的防呆處理
 # ============================================================
 
 from db import get_db_connection, get_now_iso
+from openai_service import extract_profile_memories_from_text, summarize_messages_for_memory
 
 
 # ============================================================
@@ -59,7 +65,7 @@ def get_recent_messages(user_id: str, limit: int = 12):
     rows = cursor.fetchall()
     conn.close()
 
-    # 由於剛剛是 DESC 查詢，這裡要反轉回正常時間順序
+    # 因為是 DESC 查出來，所以這裡反轉成正常時間順序
     rows.reverse()
 
     messages = []
@@ -260,7 +266,16 @@ def build_memory_context(user_id: str):
     profile_lines = []
 
     for item in profile_memories:
-        profile_lines.append(f"{item['type']}: {item['value']}")
+        memory_type = str(item.get("type", "")).strip()
+        memory_value = str(item.get("value", "")).strip()
+
+        if not memory_value:
+            continue
+
+        if memory_type:
+            profile_lines.append(f"{memory_type}: {memory_value}")
+        else:
+            profile_lines.append(memory_value)
 
     profile_text = "\n".join(profile_lines) if profile_lines else "無"
     summary_text = latest_summary if latest_summary else "無"
@@ -280,20 +295,64 @@ def clear_all_user_memory(user_id: str):
     clear_user_profiles(user_id)
     clear_user_summaries(user_id)
 
-from openai_service import extract_profile_memories_from_text, summarize_messages_for_memory
 
-
+# ============================================================
+# 自動抽取並寫入長期記憶
+# ============================================================
 def auto_extract_and_save_profile_memories(user_id: str, user_msg: str):
     """
     自動從使用者輸入中抽取長期記憶並寫入資料庫
+
+    目前相容的 memories 格式：
+    1. list[str]
+       例如：
+       [
+           "使用者名字是卡樂",
+           "使用者喜歡 Lexus IS"
+       ]
+
+    2. list[dict]
+       例如：
+       [
+           {"type": "name", "value": "卡樂"},
+           {"type": "preference", "value": "喜歡 Lexus IS"}
+       ]
+
+    若遇到字串，就先統一存成 memory_type = "fact"
     """
     memories = extract_profile_memories_from_text(user_msg)
 
-    for item in memories:
-        memory_type = item["type"]
-        memory_value = item["value"]
-        upsert_profile_memory(user_id, memory_type, memory_value)
+    if not memories:
+        return
 
+    for item in memories:
+        # ----------------------------------------------------
+        # 情況 1：item 是 dict
+        # ----------------------------------------------------
+        if isinstance(item, dict):
+            memory_type = str(item.get("type", "")).strip() or "fact"
+            memory_value = str(item.get("value", "")).strip()
+
+            if memory_value:
+                upsert_profile_memory(user_id, memory_type, memory_value)
+
+            continue
+
+        # ----------------------------------------------------
+        # 情況 2：item 是字串
+        # ----------------------------------------------------
+        memory_value = str(item).strip()
+
+        if not memory_value:
+            continue
+
+        # 目前字串型記憶統一先當作 fact 存
+        upsert_profile_memory(user_id, "fact", memory_value)
+
+
+# ============================================================
+# 對話太多時，自動摘要
+# ============================================================
 def summarize_if_needed(user_id: str, threshold: int = 20, chunk_size: int = 12):
     """
     如果某位使用者的短期對話累積太多，
@@ -342,8 +401,12 @@ def summarize_if_needed(user_id: str, threshold: int = 20, chunk_size: int = 12)
     conn.close()
 
     summary_text = summarize_messages_for_memory(old_messages)
-    save_summary(user_id, summary_text)
 
+    # 如果摘要失敗或空字串，就不要存
+    if summary_text and str(summary_text).strip():
+        save_summary(user_id, summary_text)
+
+    # 刪除已經被拿去摘要的舊訊息
     conn = get_db_connection()
     cursor = conn.cursor()
 
