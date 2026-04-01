@@ -383,36 +383,26 @@ def delete_calendar_event_by_id(user_id: str, event_id: str):
 
     參數：
     - user_id: LINE 使用者 ID
-    - event_id: Google Calendar event id
+    - event_id: Google Calendar 的事件 ID
 
     回傳格式：
     {
         "ok": True / False,
-        "message": "給前端或 LINE 顯示的訊息"
+        "message": "給 LINE 顯示的訊息"
     }
     """
 
     try:
         # ----------------------------------------------------
-        # 1. 先取得這位使用者的 Google 憑證
-        #    這裡沿用你原本查詢 / 建立行事曆時的憑證取得方式
+        # 1️⃣ 取得 Google Calendar service（重點！）
+        #    這裡直接用你原本的函式
+        #    這樣就不會影響 OAuth，也會自動處理 token refresh
         # ----------------------------------------------------
-        creds = get_google_credentials_by_user(user_id)
-
-        if not creds:
-            return {
-                "ok": False,
-                "message": "你還沒有綁定 Google 行事曆。"
-            }
+        service = get_calendar_service(user_id)
 
         # ----------------------------------------------------
-        # 2. 建立 Google Calendar API 服務物件
-        # ----------------------------------------------------
-        service = build("calendar", "v3", credentials=creds)
-
-        # ----------------------------------------------------
-        # 3. 執行刪除
-        #    calendarId='primary' 代表使用者主要行事曆
+        # 2️⃣ 呼叫 Google API 刪除事件
+        #    calendarId="primary" = 使用者主要行事曆
         # ----------------------------------------------------
         service.events().delete(
             calendarId="primary",
@@ -420,7 +410,7 @@ def delete_calendar_event_by_id(user_id: str, event_id: str):
         ).execute()
 
         # ----------------------------------------------------
-        # 4. 回傳成功結果
+        # 3️⃣ 回傳成功訊息
         # ----------------------------------------------------
         return {
             "ok": True,
@@ -428,7 +418,14 @@ def delete_calendar_event_by_id(user_id: str, event_id: str):
         }
 
     except Exception as e:
+        # ----------------------------------------------------
+        # 4️⃣ 發生錯誤（例如：
+        #    - event_id 不存在
+        #    - token 過期
+        #    - 沒有綁定
+        # ----------------------------------------------------
         print("delete_calendar_event_by_id error =", str(e))
+
         return {
             "ok": False,
             "message": f"刪除行程失敗：{str(e)}"
