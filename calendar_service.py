@@ -430,3 +430,184 @@ def delete_calendar_event_by_id(user_id: str, event_id: str):
             "ok": False,
             "message": f"刪除行程失敗：{str(e)}"
         }
+# ============================================================
+# 工具：從 event 取出 HH:MM，若是全天事件則回傳空字串
+# ============================================================
+def get_event_start_hhmm(event: dict) -> str:
+    """
+    從 Google event 取出開始時間 HH:MM
+    全天事件沒有 dateTime，因此回傳空字串
+    """
+    start = event.get("start", {})
+
+    if "dateTime" not in start:
+        return ""
+
+    try:
+        start_dt = datetime.fromisoformat(start["dateTime"]).astimezone(TAIPEI_TZ)
+        return start_dt.strftime("%H:%M")
+    except Exception:
+        return ""
+
+
+# ============================================================
+# 工具：判斷標題是否匹配
+# ============================================================
+def is_title_match(event_title: str, target_title: str) -> bool:
+    """
+    只要雙方任一方包含對方，就視為匹配
+    例如：
+    - 與太太約會 會匹配 太太
+    - 與老婆的約會 會匹配 老婆
+    """
+    event_title = (event_title or "").strip().lower()
+    target_title = (target_title or "").strip().lower()
+
+    if not target_title:
+        return True
+
+    return (target_title in event_title) or (event_title in target_title)
+
+
+# ============================================================
+# 依照條件尋找可刪除的事件
+# ============================================================
+def find_events_for_delete(
+    user_id: str,
+    date_str: str,
+    title: str = "",
+    start_str: str = "",
+    all_day: bool = False
+):
+    """
+    根據：
+    - 日期
+    - 標題（可選）
+    - 開始時間（可選）
+    - 是否全天（可選）
+    找出可能要刪除的事件
+    """
+    target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    start_dt = datetime.combine(target_date, time.min, tzinfo=TAIPEI_TZ)
+    end_dt = start_dt + timedelta(days=1)
+
+    events = list_events(user_id, start_dt, end_dt)
+
+    matched = []
+
+    for event in events:
+        event_title = get_event_title(event)
+        event_start_hhmm = get_event_start_hhmm(event)
+
+        event_is_all_day = "date" in event.get("start", {})
+
+        # ----------------------------------------------------
+        # 如果要求全天事件，但目前 event 不是全天，跳過
+        # ----------------------------------------------------
+        if all_day and not event_is_all_day:
+            continue
+
+        # ----------------------------------------------------
+        # 如果有指定時間，必須比對開始時間
+        # ----------------------------------------------------
+        if start_str:
+            if event_start_hhmm != start_str:
+                continue
+
+        # ----------------------------------------------------
+        # 如果有指定標題，做模糊包含比對
+        # ----------------------------------------------------
+        if title:
+            if not is_title_match(event_title, title):
+                continue
+
+        matched.append(event)
+
+    return matched
+
+# ============================================================
+# 刪除 Google 行事曆事件（用日期 / 標題 / 時間比對）
+# ============================================================
+def delete_calendar_event(
+    user_id: str,
+    title: str = "",
+    date_str: str = "",
+    start_str: str = "",
+    all_day: bool = False
+):
+    """
+    正式版刪除流程：
+    1. 先用日期抓出當天事件
+    2. 再用標題 / 時間篩選
+    3. 若只找到 1 筆，就直接刪除
+    4. 若找到 0 筆，回覆找不到
+    5. 若找到多筆，回覆請使用者再講更精準
+    """
+
+    try:
+        if not date_str:
+            return {
+                "ok": False,
+                "message": "刪除行程失敗：缺少日期。"
+            }
+
+        matched_events = find_events_for_delete(
+            user_id=user_id,
+            date_str=date_str,
+            title=title,
+            start_str=start_str,
+            all_day=all_day
+        )
+
+        # ----------------------------------------------------
+        # 找不到
+        # ----------------------------------------------------
+        if not matched_events:
+            return {
+                "ok": False,
+                "message": "我找不到符合條件的行程，請再提供更完整的日期、時間或主題。"
+            }
+
+        # ----------------------------------------------------
+        # 找到多筆，先不要刪，避免誤刪
+        # ----------------------------------------------------
+        if len(matched_events) > 1:
+            lines = ["我找到多筆符合的行程，請再說得更精準一點："]
+
+            for event in matched_events[:5]:
+                lines.append(f"- {format_event_time(event)} | {get_event_title(event)}")
+
+            return {
+                "ok": False,
+                "message": "\n".join(lines)
+            }
+
+        # ----------------------------------------------------
+        # 只找到 1 筆，直接刪除
+        # ----------------------------------------------------
+        target_event = matched_events[0]
+        event_id = target_event.get("id", "")
+        event_text = f"{format_event_time(target_event)} | {get_event_title(target_event)}"
+
+        if not event_id:
+            return {
+                "ok": False,
+                "message": "刪除行程失敗：找不到事件 ID。"
+            }
+
+        delete_result = delete_calendar_event_by_id(user_id, event_id)
+
+        if not delete_result.get("ok", False):
+            return delete_result
+
+        return {
+            "ok": True,
+            "message": f"已幫你刪除行程：\n{event_text}"
+        }
+
+    except Exception as e:
+        print("delete_calendar_event error =", str(e))
+        return {
+            "ok": False,
+            "message": f"刪除行程失敗：{str(e)}"
+        }
