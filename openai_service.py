@@ -195,7 +195,7 @@ def parse_assistant_action(user_msg: str, calendar_context_text: str = "") -> di
     回傳格式：
     {
       "action": "general_chat" | "google_bind" | "memory_forget" |
-                "calendar_query" | "calendar_create",
+                "calendar_query" | "calendar_create" | "calendar_delete",
 
       "calendar_query_type": "" | "today" | "tomorrow" | "this_week" |
                              "next_week" | "recent" | "future" |
@@ -245,7 +245,8 @@ def parse_assistant_action(user_msg: str, calendar_context_text: str = "") -> di
 行事曆判斷規則：
 4. 「幫我看今天行程」「我這週有哪些會議」「我明天下午有空嗎」「5/1 我有要去澎湖嗎」這類，是 calendar_query
 5. 「明天下午三點安排與 Google 開會」「我5/1加入去澎湖三天」這類，是 calendar_create
-6. 若句子很短，例如「下個月呢？」「那明天呢？」，但有提供 calendar_context_text，請優先視為延續上一輪行事曆查詢
+6. 「刪除今天下午一點與太太約會」「把明天下午三點的會議刪掉」「取消 5/1 去澎湖」這類，是 calendar_delete
+7. 若句子很短，例如「下個月呢？」「那明天呢？」「把那個刪掉」，但有提供 calendar_context_text，請優先視為延續上一輪行事曆上下文
 
 calendar_query_type 只能是：
 - ""
@@ -260,30 +261,41 @@ calendar_query_type 只能是：
 - "exact_date"
 
 行事曆查詢補充規則：
-7. 若是查某一個明確日期，例如「5/1 我有要去澎湖嗎」「2026/5/1 有行程嗎」，請：
+8. 若是查某一個明確日期，例如「5/1 我有要去澎湖嗎」「2026/5/1 有行程嗎」，請：
    - action = "calendar_query"
    - calendar_query_type = "exact_date"
    - query_date = 對應日期
-8. 若月份日期未寫年份，例如 5/1，預設使用 {current_year} 年
-9. 若不是 exact_date，query_date 請給空字串
+9. 若月份日期未寫年份，例如 5/1，預設使用 {current_year} 年
+10. 若不是 exact_date，query_date 請給空字串
 
 行事曆建立補充規則：
-10. 若是一般單日事件，請填：
+11. 若是一般單日事件，請填：
    - date
    - start
    - end
    - title
-11. 若是多天旅行 / 多天活動，例如「5/1 去澎湖三天」，請填：
+12. 若是多天旅行 / 多天活動，例如「5/1 去澎湖三天」，請填：
    - all_day = true
    - start_date = 2026-05-01
    - end_date = 2026-05-03
    - title = 去澎湖
-12. 多天事件的 end_date 代表最後一天（含當天）
-13. 若只知道開始時間但沒說結束時間，請預設 end = start + 1 小時
-14. 若開始時間是 23:00 左右，不可輸出 24:00，請改成 23:59
-15. 若不是 calendar_create，date/start/end/title/all_day/start_date/end_date 請給空值或 false
-16. 若需要追問，needs_clarification = true，並寫 clarification_question
-17. 若不需要追問，clarification_question 給空字串
+13. 多天事件的 end_date 代表最後一天（含當天）
+14. 若只知道開始時間但沒說結束時間，請預設 end = start + 1 小時
+15. 若開始時間是 23:00 左右，不可輸出 24:00，請改成 23:59
+
+行事曆刪除補充規則：
+16. 若是 calendar_delete，請盡量解析：
+   - date
+   - start
+   - title
+   - all_day
+17. calendar_delete 不需要填 end
+18. 若使用者只說「刪掉會議」但缺日期，needs_clarification = true
+19. 若使用者有日期，但沒有明確主題與時間，needs_clarification = true
+20. 若不是 calendar_create，start_date / end_date 請給空字串
+21. 若不是 calendar_delete，刪除用途的欄位照一般規則回傳
+22. 若需要追問，needs_clarification = true，並寫 clarification_question
+23. 若不需要追問，clarification_question 給空字串
 
 今天日期（Asia/Taipei）：
 - 今天：{today_str}
@@ -415,7 +427,6 @@ calendar_query_type 只能是：
     except Exception as e:
         print("parse_assistant_action error =", str(e))
         return fallback
-
 
 # ============================================================
 # 一般聊天 / 搜尋 / 問答（含 AI 上網搜尋）
