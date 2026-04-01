@@ -235,6 +235,7 @@ def parse_assistant_action(user_msg: str, calendar_context_text: str = "") -> di
 - "memory_forget"     -> 清除記憶
 - "calendar_query"    -> 查行事曆
 - "calendar_create"   -> 新增行事曆
+- "calendar_delete"   -> 刪除行事曆事件
 
 非常重要的限制：
 1. 目前系統只支援 Google 行事曆
@@ -367,7 +368,8 @@ calendar_query_type 只能是：
             "google_bind",
             "memory_forget",
             "calendar_query",
-            "calendar_create"
+            "calendar_create",
+            "calendar_delete"
         }
 
         allowed_query_types = {
