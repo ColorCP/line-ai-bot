@@ -3,7 +3,7 @@
 # 功能：
 # 1. 接收 LINE Webhook
 # 2. 處理 Google 行事曆 OAuth 綁定
-# 3. 處理 Google 行事曆查詢 / 建立事件
+# 3. 處理 Google 行事曆查詢 / 建立 / 刪除事件
 # 4. 處理記憶功能
 # 5. 呼叫 AI 做一般問答 / 搜尋
 # ============================================================
@@ -39,7 +39,8 @@ from google_oauth_service import (
 from calendar_service import (
     get_events_payload_by_query,
     get_events_payload_by_exact_date,
-    create_calendar_event
+    create_calendar_event,
+    delete_calendar_event
 )
 
 from calendar_context_service import (
@@ -51,8 +52,6 @@ from calendar_context_service import (
 
 # ============================================================
 # 建立 FastAPI app
-# Railway / Uvicorn 會找這個 app
-# 啟動指令要對應 main:app
 # ============================================================
 app = FastAPI()
 
@@ -150,7 +149,6 @@ def is_google_calendar_bound(user_id: str) -> bool:
 
 # ============================================================
 # 首頁健康檢查
-# Railway 可用來確認服務是否活著
 # ============================================================
 @app.get("/")
 def root():
@@ -159,7 +157,6 @@ def root():
 
 # ============================================================
 # Google OAuth 起始點
-# 使用者點擊這個網址後，會跳去 Google 授權頁面
 # ============================================================
 @app.get("/google/oauth/start")
 def google_oauth_start(user_id: str):
@@ -189,7 +186,6 @@ def google_oauth_start(user_id: str):
 
 # ============================================================
 # Google OAuth Callback
-# Google 授權成功後會導回這裡
 # ============================================================
 @app.get("/google/oauth/callback")
 def google_oauth_callback(code: str, state: str):
@@ -215,19 +211,12 @@ def google_oauth_callback(code: str, state: str):
         )
 
     try:
-        # ====================================================
-        # 用 code 換 token，並儲存到 DB
-        # 同時回傳綁定的 LINE user_id
-        # ====================================================
         user_id = exchange_code_and_save_token(
             code=code,
             state=state,
             base_url=APP_BASE_URL
         )
 
-        # ====================================================
-        # 綁定成功頁面（你要的樣式）
-        # ====================================================
         html = f"""
         <!DOCTYPE html>
         <html lang="zh-Hant">
@@ -323,6 +312,7 @@ def google_oauth_callback(code: str, state: str):
                     <li>幫我看今天行程</li>
                     <li>我這週有哪些會議</li>
                     <li>明天下午三點安排與 Google 開會</li>
+                    <li>刪除今天下午一點與太太約會</li>
                     <li>東京明天天氣如何</li>
                     <li>今天有什麼科技新聞</li>
                 </ul>
@@ -389,7 +379,6 @@ def google_oauth_callback(code: str, state: str):
 
 # ============================================================
 # LINE Webhook
-# LINE 傳來的訊息都會從這裡進來
 # ============================================================
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -397,7 +386,7 @@ async def webhook(request: Request):
     LINE Bot 的主入口：
     1. 解析使用者訊息
     2. 判斷是否要綁定 Google
-    3. 判斷是否是行事曆查詢 / 建立
+    3. 判斷是否是行事曆查詢 / 建立 / 刪除
     4. 判斷是否清除記憶
     5. 其餘交給 AI 搜尋 / 問答
     """
@@ -412,9 +401,6 @@ async def webhook(request: Request):
 
     for event in events:
         try:
-            # ------------------------------------------------
-            # 只處理文字訊息
-            # ------------------------------------------------
             if event.get("type") != "message":
                 continue
 
@@ -430,16 +416,10 @@ async def webhook(request: Request):
             print("user_id =", user_id)
             print("user_msg =", user_msg)
 
-            # ------------------------------------------------
-            # 沒有 user_id 就無法做綁定 / 記憶 / 行事曆
-            # ------------------------------------------------
             if not user_id:
                 reply(reply_token, "無法取得使用者資訊")
                 continue
 
-            # ------------------------------------------------
-            # 功能說明
-            # ------------------------------------------------
             if user_msg in ["功能", "說明", "help", "HELP"]:
                 reply(
                     reply_token,
@@ -454,6 +434,7 @@ async def webhook(request: Request):
 - 幫我看今天行程
 - 我5/1有要去澎湖嗎
 - 我5/1加入去澎湖三天
+- 刪除今天下午一點與太太約會
 
 【🧹 記憶功能】
 - 清除記憶
@@ -461,9 +442,6 @@ async def webhook(request: Request):
                 )
                 continue
 
-            # ------------------------------------------------
-            # 先處理明確的 Google 綁定需求
-            # ------------------------------------------------
             if is_google_bind_request(user_msg):
                 if not APP_BASE_URL:
                     reply(reply_token, "系統尚未設定網址")
@@ -477,22 +455,10 @@ async def webhook(request: Request):
                 reply(reply_token, f"請點擊以下連結綁定 Google 行事曆：\n{bind_url}")
                 continue
 
-            # ------------------------------------------------
-            # 是否需要把先前查過的行事曆內容當上下文帶入
-            # ------------------------------------------------
             calendar_context_text = ""
             if should_use_calendar_context(user_msg):
                 calendar_context_text = build_calendar_context_text(user_id=user_id)
 
-            # ------------------------------------------------
-            # 讓 AI 先判斷這句話屬於什麼動作
-            # 例如：
-            # - google_bind
-            # - calendar_query
-            # - calendar_create
-            # - memory_forget
-            # - general_chat
-            # ------------------------------------------------
             parsed_action = parse_assistant_action(
                 user_msg=user_msg,
                 calendar_context_text=calendar_context_text
@@ -501,18 +467,12 @@ async def webhook(request: Request):
 
             action = parsed_action.get("action", "general_chat")
 
-            # ------------------------------------------------
-            # 清除記憶
-            # ------------------------------------------------
             if action == "memory_forget":
                 clear_all_user_memory(user_id)
                 clear_calendar_context(user_id)
                 reply(reply_token, "我已經幫你清除記憶")
                 continue
 
-            # ------------------------------------------------
-            # AI 判斷要進行 Google 綁定
-            # ------------------------------------------------
             if action == "google_bind":
                 if not APP_BASE_URL:
                     reply(reply_token, "系統尚未設定網址")
@@ -526,9 +486,9 @@ async def webhook(request: Request):
                 reply(reply_token, f"請點擊以下連結綁定 Google 行事曆：\n{bind_url}")
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # 行事曆查詢
-            # ------------------------------------------------
+            # =================================================
             if action == "calendar_query":
                 query_type = parsed_action.get("calendar_query_type", "") or "today"
                 query_date = (parsed_action.get("query_date", "") or "").strip()
@@ -544,7 +504,6 @@ async def webhook(request: Request):
                         query_type=query_type
                     )
 
-                # 把這次查到的行程存成上下文，方便下一句接著問
                 save_calendar_context(
                     user_id=user_id,
                     query_type=query_payload["query_type"],
@@ -555,13 +514,12 @@ async def webhook(request: Request):
                 reply(reply_token, query_payload["text"])
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # 行事曆建立事件
-            # ------------------------------------------------
+            # =================================================
             if action == "calendar_create":
                 needs_clarification = parsed_action.get("needs_clarification", False)
 
-                # 如果資訊不夠完整，先回問使用者
                 if needs_clarification:
                     clarification_question = (parsed_action.get("clarification_question", "") or "").strip()
                     if clarification_question:
@@ -573,7 +531,6 @@ async def webhook(request: Request):
                 all_day = bool(parsed_action.get("all_day", False))
                 title = (parsed_action.get("title", "") or "").strip()
 
-                # 多天 / 全天事件
                 if all_day:
                     start_date = (parsed_action.get("start_date", "") or "").strip()
                     end_date = (parsed_action.get("end_date", "") or "").strip()
@@ -593,7 +550,6 @@ async def webhook(request: Request):
                     reply(reply_token, result["message"])
                     continue
 
-                # 一般有時間的事件
                 date_str = (parsed_action.get("date", "") or "").strip()
                 start_str = (parsed_action.get("start", "") or "").strip()
                 end_str = (parsed_action.get("end", "") or "").strip()
@@ -614,9 +570,44 @@ async def webhook(request: Request):
                 reply(reply_token, result["message"])
                 continue
 
-            # ------------------------------------------------
+            # =================================================
+            # 行事曆刪除事件
+            # =================================================
+            if action == "calendar_delete":
+                needs_clarification = parsed_action.get("needs_clarification", False)
+
+                if needs_clarification:
+                    clarification_question = (parsed_action.get("clarification_question", "") or "").strip()
+                    if clarification_question:
+                        reply(reply_token, clarification_question)
+                    else:
+                        reply(reply_token, "我可以幫你刪除行程，但我還缺少一些資訊。")
+                    continue
+
+                all_day = bool(parsed_action.get("all_day", False))
+                title = (parsed_action.get("title", "") or "").strip()
+                date_str = (parsed_action.get("date", "") or "").strip()
+                start_str = (parsed_action.get("start", "") or "").strip()
+
+                # 刪除至少要能辨識日期，並且至少要有 title 或時間其中之一
+                if not date_str or (not title and not start_str):
+                    reply(reply_token, "我可以幫你刪除行程，但請至少告訴我日期，以及行程主題或時間。")
+                    continue
+
+                result = delete_calendar_event(
+                    user_id=user_id,
+                    title=title,
+                    date_str=date_str,
+                    start_str=start_str,
+                    all_day=all_day
+                )
+
+                reply(reply_token, result["message"])
+                continue
+
+            # =================================================
             # 一般聊天 / AI 搜尋 / 新聞 / 天氣等
-            # ------------------------------------------------
+            # =================================================
             auto_extract_and_save_profile_memories(user_id, user_msg)
             summarize_if_needed(user_id)
 
@@ -630,7 +621,6 @@ async def webhook(request: Request):
                 calendar_context_text=calendar_context_text
             )
 
-            # 儲存對話紀錄
             save_message(user_id, "user", user_msg)
             save_message(user_id, "assistant", ai_reply)
 
