@@ -534,11 +534,17 @@ async def webhook(request: Request):
                 if all_day:
                     start_date = (parsed_action.get("start_date", "") or "").strip()
                     end_date = (parsed_action.get("end_date", "") or "").strip()
-
+                
                     if not all([start_date, end_date, title]):
-                        reply(reply_token, "我可以幫你新增多天行程，請給我日期、事件、時間, ex: 新增行程3/1 下午六點與朋友在101聚餐。刪除行程時請輸入: 刪除3/1與朋友在101聚餐")
+                        reply(
+                            reply_token,
+                            "我可以幫你新增行程，但資訊還不夠完整。\n"
+                            "請提供日期，事件與時間。\n"
+                            "例如：\n"
+                            "• 新增 3/1 東京之旅（整天）\n"
+                            "• 新增 3/1 下午3點開會"
+                        )
                         continue
-
                     result = create_calendar_event(
                         user_id=user_id,
                         title=title,
@@ -591,7 +597,14 @@ async def webhook(request: Request):
 
                 # 刪除至少要能辨識日期，並且至少要有 title 或時間其中之一
                 if not date_str or (not title and not start_str):
-                    reply(reply_token, "我可以幫你刪除行程，但請至少告訴我日期，以及行程主題或時間。")
+                    reply(
+                        reply_token,
+                        "我可以幫你刪除行程，但資訊還不夠完整。\n"
+                        "請先查詢行事曆，提供日期，並補上時間與事件名稱。\n"
+                        "例如：\n"
+                        "• 刪除 3/1 下午3點開會\n"
+                        "• 刪除 6/1 與朋友的約會"
+                    )
                     continue
 
                 result = delete_calendar_event(
